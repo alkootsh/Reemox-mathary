@@ -1,0 +1,10 @@
+{
+  "name": "MARO Lite",
+  "description": "نظام محاسبي وسحابي متكامل لإدارة المبيعات والمخزون والمصروفات وصلاحيات الموظفين والكاشير - MARO ERP Lite",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

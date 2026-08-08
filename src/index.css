@@ -1,0 +1,137 @@
+@import "tailwindcss";
+
+:root {
+  --color-primary: #f8fafc;
+  --color-secondary: #ffffff;
+  --color-accent: #3b82f6;
+  --color-gold: #e94560;
+  --color-gold2: #f5a623;
+  --color-text-main: #0f172a;
+  --color-text-dim: #64748b;
+  --color-card: #ffffff;
+  --color-card2: #f1f5f9;
+  --color-border: #e2e8f0;
+  --color-success: #10b981;
+  --color-danger: #ef4444;
+}
+
+.dark {
+  --color-primary: #1a1a2e;
+  --color-secondary: #16213e;
+  --color-accent: #0f3460;
+  --color-gold: #e94560;
+  --color-gold2: #f5a623;
+  --color-text-main: #eaeaea;
+  --color-text-dim: #8892a4;
+  --color-card: #1e2a3a;
+  --color-card2: #243447;
+  --color-border: #2d4060;
+  --color-success: #00c896;
+  --color-danger: #ff4757;
+}
+
+@theme {
+  --color-primary: var(--color-primary);
+  --color-secondary: var(--color-secondary);
+  --color-accent: var(--color-accent);
+  --color-gold: var(--color-gold);
+  --color-gold2: var(--color-gold2);
+  --color-text-main: var(--color-text-main);
+  --color-text-dim: var(--color-text-dim);
+  --color-card: var(--color-card);
+  --color-card2: var(--color-card2);
+  --color-border: var(--color-border);
+  --color-success: var(--color-success);
+  --color-danger: var(--color-danger);
+}
+
+body {
+  background-color: var(--color-primary);
+  color: var(--color-text-main);
+}
+
+/* =========================================================
+   Custom Print Stylesheet for POS Invoices & Thermal Receipts
+   ========================================================= */
+@media print {
+  /* Hide all regular screen elements */
+  body * {
+    visibility: hidden;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Only make the printable receipt container visible */
+  #print-area,
+  #print-area *,
+  .printable-area,
+  .printable-area * {
+    visibility: visible;
+  }
+
+  #print-area,
+  .printable-area {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0 auto;
+    padding: 8px 12px;
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif, monospace;
+    font-size: 12px;
+    line-height: 1.4;
+    direction: rtl;
+    box-shadow: none !important;
+    border: none !important;
+  }
+
+  /* Thermal Receipt Specific Format (80mm width standard) */
+  .receipt-thermal {
+    max-width: 80mm;
+    margin: 0 auto;
+    padding: 4px;
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  .receipt-thermal table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .receipt-thermal th,
+  .receipt-thermal td {
+    padding: 3px 0;
+    color: #000000 !important;
+    border-bottom: 1px dashed #777;
+    font-size: 11px;
+  }
+
+  .receipt-thermal .divider-dashed {
+    border-top: 1px dashed #444 !important;
+    margin: 6px 0;
+  }
+
+  .receipt-thermal .divider-double {
+    border-top: 2px solid #000 !important;
+    margin: 6px 0;
+  }
+
+  /* Disable buttons and links during printing */
+  .no-print,
+  button,
+  nav,
+  input,
+  header {
+    display: none !important;
+  }
+
+  /* Avoid awkward page breaking */
+  .page-break-avoid {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+}
+

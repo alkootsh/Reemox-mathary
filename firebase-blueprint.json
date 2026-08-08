@@ -1,0 +1,69 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Inventory product entity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "sku": { "type": "string" },
+        "price": { "type": "number" },
+        "quantity": { "type": "number" }
+      },
+      "required": ["id", "name", "sku", "price", "quantity"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Product category entity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Customer entity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "phone": { "type": "string" },
+        "openingBalance": { "type": "number" }
+      },
+      "required": ["id", "name", "phone", "openingBalance"]
+    },
+    "Sale": {
+        "title": "Sale",
+        "description": "Sale transaction entity",
+        "type": "object",
+        "properties": {
+            "id": { "type": "string" },
+            "customer": { "type": "string" },
+            "total": { "type": "number" },
+            "date": { "type": "string" }
+        },
+        "required": ["id", "customer", "total", "date"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": "Product",
+      "description": "All products in inventory"
+    },
+    "/categories/{categoryId}": {
+      "schema": "Category",
+      "description": "All product categories"
+    },
+    "/customers/{customerId}": {
+      "schema": "Customer",
+      "description": "All customers"
+    },
+    "/sales/{saleId}": {
+        "schema": "Sale",
+        "description": "All sales transactions"
+    }
+  }
+}
