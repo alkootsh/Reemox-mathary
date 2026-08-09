@@ -288,15 +288,16 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
       return;
     }
 
-    const item = cart.find(it => it.product.id === productId);
-    if (preventSellBelowCost && item?.product.cost && num < item.product.cost && currentUser?.role !== 'admin' && !supervisorOverrideActive) {
+    const item = cart.find(it => it.product?.id === productId);
+    const itemCost = item?.product?.cost ?? 0;
+    if (preventSellBelowCost && itemCost > 0 && num < itemCost && currentUser?.role !== 'admin' && !supervisorOverrideActive) {
       playWarningSound();
-      alert(`⚠️ تنبيه: لا يمكن البيع بأقل من سعر التكلفة (${item.product.cost} ج.م) وفقاً لسياسة الإدارة`);
+      alert(`⚠️ تنبيه: لا يمكن البيع بأقل من سعر التكلفة (${itemCost} ج.م) وفقاً لسياسة الإدارة`);
       return;
     }
 
     setCart(prev => prev.map(it => {
-      if (it.product.id === productId) {
+      if (it.product?.id === productId) {
         return {
           ...it,
           price: num,
@@ -312,7 +313,7 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
 
   const handleResetPrice = (productId: string) => {
     setCart(prev => prev.map(it => {
-      if (it.product.id === productId) {
+      if (it.product?.id === productId) {
         return {
           ...it,
           price: it.originalPrice,
@@ -331,7 +332,7 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
     setIsSupervisorModalOpen(false);
     
     if (pendingPriceEditProductId) {
-      const item = cart.find(it => it.product.id === pendingPriceEditProductId);
+      const item = cart.find(it => it.product?.id === pendingPriceEditProductId);
       if (item) {
         setEditingProductId(pendingPriceEditProductId);
         setTempPriceValue(item.price.toString());
@@ -407,7 +408,7 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
     playSuccessSound();
 
     setCart(prev => {
-      const idx = prev.findIndex(item => item.product.id === product.id);
+      const idx = prev.findIndex(item => item.product?.id === product.id);
       if (idx > -1) {
         const next = [...prev];
         next[idx] = { ...next[idx], quantity: next[idx].quantity + 1 };
@@ -428,7 +429,7 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
   const updateQuantity = (id: string, delta: number) => {
     setCart(prev => {
       return prev.map(item => {
-        if (item.product.id === id) {
+        if (item.product?.id === id) {
           const nextQty = item.quantity + delta;
           return { ...item, quantity: nextQty };
         }
@@ -626,11 +627,11 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
         id: saleId,
         invoiceNumber: `INV-${orderNum}`,
         items: cart.map(item => ({
-          productId: item.product.id,
-          name: item.product.name,
+          productId: item.product?.id || '',
+          name: item.product?.name || 'صنف',
           quantity: item.quantity,
           price: item.price,
-          unitCost: item.product.cost || 0
+          unitCost: item.product?.cost ?? 0
         })),
         subtotal,
         discount: discountAmount,
@@ -661,8 +662,9 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
       };
 
       // Try saving to DB transaction
+      let dbSavedSale = saleData;
       try {
-        await processSale({
+        const saleResult = await processSale({
           items: saleData.items,
           subtotal: saleData.subtotal,
           discount: saleData.discount,
@@ -681,11 +683,19 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
           userId: saleData.userId,
           branchId: saleData.branchId
         }, currentUser?.id || 'admin');
+
+        if (saleResult && saleResult.invoiceNumber) {
+          dbSavedSale = {
+            ...saleData,
+            id: saleResult.id,
+            invoiceNumber: saleResult.invoiceNumber
+          };
+        }
       } catch (err) {
         console.warn('Saved locally due to offline/mock product', err);
       }
 
-      setLastCompletedSale(saleData);
+      setLastCompletedSale(dbSavedSale);
       setWhatsAppPhoneInput(selectedCust?.phone || '');
       setIsCheckoutModalOpen(false);
       setShowSuccessModal(true);
@@ -1037,17 +1047,20 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
               السلة فارغة. اضغط على أي صنف لإضافته للفاتورة.
             </div>
           ) : (
-            cart.map(item => (
-              <div key={item.product.id} className={`p-2.5 rounded-2xl border transition-all ${
+            cart.map((item, idx) => {
+              const itemCost = item.product?.cost ?? 0;
+              const prodId = item.product?.id || `cart-${idx}`;
+              return (
+              <div key={prodId} className={`p-2.5 rounded-2xl border transition-all ${
                 item.isCustomPrice 
                   ? 'bg-amber-500/10 border-amber-500/40' 
                   : 'bg-slate-900 border-slate-800'
               }`}>
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                    <span className="text-2xl">{item.product.emoji || '📦'}</span>
+                    <span className="text-2xl">{item.product?.emoji || '📦'}</span>
                     <div className="min-w-0 flex-1">
-                      <p className="text-xs font-bold text-slate-100 truncate">{item.product.name}</p>
+                      <p className="text-xs font-bold text-slate-100 truncate">{item.product?.name || 'صنف'}</p>
                       <div className="flex items-center gap-1.5 mt-0.5">
                         <span className="text-[11px] text-slate-400 font-mono">{item.price} ج.م × {item.quantity}</span>
                         {item.isCustomPrice && (
@@ -1063,7 +1076,7 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
                   <div className="flex items-center gap-2">
                     {/* Price edit button */}
                     <button
-                      onClick={() => handleStartPriceEdit(item.product, item.price)}
+                      onClick={() => item.product && handleStartPriceEdit(item.product, item.price)}
                       className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-amber-400 border border-slate-700 rounded-xl text-[11px] font-bold flex items-center gap-1 transition-all"
                       title="تعديل سعر البيع لهذا الصنف"
                     >
@@ -1074,14 +1087,14 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
                     {/* Quantity - + */}
                     <div className="flex items-center gap-1 bg-slate-800 border border-slate-700 rounded-xl p-1">
                       <button 
-                        onClick={() => updateQuantity(item.product.id, -1)} 
+                        onClick={() => updateQuantity(prodId, -1)} 
                         className="w-6 h-6 flex items-center justify-center hover:bg-slate-700 rounded-lg text-slate-300 font-black text-xs"
                       >
                         -
                       </button>
                       <span className="font-bold text-xs px-1.5 font-mono text-amber-400">{item.quantity}</span>
                       <button 
-                        onClick={() => updateQuantity(item.product.id, 1)} 
+                        onClick={() => updateQuantity(prodId, 1)} 
                         className="w-6 h-6 flex items-center justify-center hover:bg-slate-700 rounded-lg text-slate-300 font-black text-xs"
                       >
                         +
@@ -1093,7 +1106,7 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
                     </span>
 
                     <button 
-                      onClick={() => updateQuantity(item.product.id, -item.quantity)} 
+                      onClick={() => updateQuantity(prodId, -item.quantity)} 
                       className="text-slate-500 hover:text-rose-400 p-1"
                       title="حذف"
                     >
@@ -1103,7 +1116,7 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
                 </div>
 
                 {/* Inline Price Editing Sub-form */}
-                {editingProductId === item.product.id && (
+                {editingProductId === prodId && (
                   <div className="bg-slate-850 p-2.5 rounded-xl border border-amber-500/50 mt-2 space-y-1.5 animate-fadeIn">
                     <div className="flex items-center justify-between text-[11px]">
                       <span className="text-amber-400 font-bold">تعديل سعر الوحدة (ج.م):</span>
@@ -1122,14 +1135,14 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
                         autoFocus
                       />
                       <button 
-                        onClick={() => handleSavePrice(item.product.id)}
+                        onClick={() => handleSavePrice(prodId)}
                         className="bg-amber-500 hover:bg-amber-400 text-slate-950 px-3 py-1.5 rounded-lg text-xs font-black shadow-sm"
                       >
                         حفظ
                       </button>
                       {item.isCustomPrice && (
                         <button 
-                          onClick={() => handleResetPrice(item.product.id)}
+                          onClick={() => handleResetPrice(prodId)}
                           className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-2 py-1.5 rounded-lg text-xs"
                           title="استعادة السعر الأصلي"
                         >
@@ -1144,16 +1157,17 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
                       </button>
                     </div>
 
-                    {preventSellBelowCost && item.product.cost && Number(tempPriceValue) < item.product.cost && (
+                    {preventSellBelowCost && itemCost > 0 && Number(tempPriceValue) < itemCost && (
                       <p className="text-[10px] text-rose-400 font-bold flex items-center gap-1">
                         <ShieldAlert size={11} />
-                        تحذير: السعر أقل من التكلفة ({item.product.cost} ج.م)!
+                        تحذير: السعر أقل من التكلفة ({itemCost} ج.م)!
                       </p>
                     )}
                   </div>
                 )}
               </div>
-            ))
+            );
+            })
           )}
         </div>
 

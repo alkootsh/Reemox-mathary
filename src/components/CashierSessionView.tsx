@@ -1,7 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import { CashierSession, Sale } from '../types/types';
 import { getCashierSessions, openCashierSession, closeCashierSession, getSales } from '../lib/firestoreService';
-import { ShieldAlert, CheckCircle2, DollarSign, Lock, Unlock, FileText, RefreshCw } from 'lucide-react';
+import { ShieldAlert, CheckCircle2, DollarSign, Lock, Unlock, FileText, RefreshCw, MessageSquare, Mail, Send } from 'lucide-react';
+import { getNotificationConfig, openDirectWhatsAppChat } from '../lib/notifications';
+import { playSuccessSound } from '../lib/sound';
 
 export default function CashierSessionView() {
   const [sessions, setSessions] = useState<CashierSession[]>([]);
@@ -76,7 +78,52 @@ export default function CashierSessionView() {
         creditSales
       });
       setActualCashInput('');
-      alert('تم إغلاق الوردية وإنشاء تقرير Z بنجاح');
+      playSuccessSound();
+
+      // Build Z-Report WhatsApp Message for Manager
+      const cfg = getNotificationConfig();
+      const diff = actual - expectedCash;
+      const zMsg = `📊 *تقرير تقفيل الوردية (Z-Report) للمدير*
+🏪 *المنشأة:* ${cfg.businessName}
+👤 *الكاشير:* ${activeSession.cashierName}
+⏰ *وقت الفتح:* ${new Date(activeSession.openedAt).toLocaleTimeString('ar-EG')}
+🏁 *وقت الإغلاق:* ${new Date().toLocaleTimeString('ar-EG')}
+--------------------------------
+💵 *رصيد الافتتاح:* ${activeSession.openingCash} ج.م
+💰 *مبيعات نقدية (Cash):* ${cashSales} ج.م
+💳 *مبيعات بطاقة (Card):* ${cardSales} ج.م
+📱 *مبيعات محفظة (Wallet):* ${walletSales} ج.م
+🧾 *مبيعات آجل (Credit):* ${creditSales} ج.م
+--------------------------------
+🎯 *المتوقع بالدرج:* ${expectedCash} ج.م
+📥 *الفعلي بالدرج:* ${actual} ج.م
+⚖️ *الفارق (عجز/زيادة):* ${diff === 0 ? 'مطابق تماماً 0 ج.م ✅' : diff > 0 ? `+${diff} ج.م (زيادة)` : `${diff} ج.م (عجز ⚠️)`}`;
+
+      if (cfg.notifyDailySummary) {
+        // Try server dispatch in background
+        fetch('/api/notify-whatsapp', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: zMsg })
+        }).catch(e => console.warn('Twilio z-report bg dispatch:', e));
+
+        if (cfg.managerEmail) {
+          fetch('/api/notify-email', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              to: cfg.managerEmail,
+              subject: `📊 تقرير تقفيل الوردية (Z-Report) - ${activeSession.cashierName}`,
+              message: zMsg
+            })
+          }).catch(e => console.warn('Email z-report bg dispatch:', e));
+        }
+
+        // Open direct WhatsApp for immediate delivery
+        openDirectWhatsAppChat(cfg.managerWhatsApp, zMsg, cfg.managerWhatsAppCountryCode);
+      }
+
+      alert('تم إغلاق الوردية وإنشاء تقرير Z بنجاح وإرسال التنبيه للمدير ✅');
       await loadData();
     } catch (err: any) {
       alert(err.message);
@@ -241,22 +288,49 @@ export default function CashierSessionView() {
                 <th className="p-3 text-center">المتوقع</th>
                 <th className="p-3 text-center">الفعلي</th>
                 <th className="p-3 text-center">العجز / الزيادة</th>
+                <th className="p-3 text-center">إجراءات التقرير</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
-              {sessions.filter(s => s.status === 'CLOSED').map(s => (
-                <tr key={s.id} className="hover:bg-card2/50">
-                  <td className="p-3 font-bold">{s.cashierName}</td>
-                  <td className="p-3 text-xs text-text-dim">{new Date(s.openedAt).toLocaleString('ar-EG')}</td>
-                  <td className="p-3 text-xs text-text-dim">{s.closedAt ? new Date(s.closedAt).toLocaleString('ar-EG') : '-'}</td>
-                  <td className="p-3 text-center">{s.openingCash} ج.م</td>
-                  <td className="p-3 text-center">{s.expectedCash} ج.م</td>
-                  <td className="p-3 text-center font-bold">{s.actualCash} ج.م</td>
-                  <td className={`p-3 text-center font-black ${s.difference! < 0 ? 'text-danger' : s.difference! > 0 ? 'text-success' : 'text-text-dim'}`}>
-                    {s.difference} ج.م
-                  </td>
-                </tr>
-              ))}
+              {sessions.filter(s => s.status === 'CLOSED').map(s => {
+                const diff = s.difference || 0;
+                return (
+                  <tr key={s.id} className="hover:bg-card2/50">
+                    <td className="p-3 font-bold">{s.cashierName}</td>
+                    <td className="p-3 text-xs text-text-dim">{new Date(s.openedAt).toLocaleString('ar-EG')}</td>
+                    <td className="p-3 text-xs text-text-dim">{s.closedAt ? new Date(s.closedAt).toLocaleString('ar-EG') : '-'}</td>
+                    <td className="p-3 text-center">{s.openingCash} ج.م</td>
+                    <td className="p-3 text-center">{s.expectedCash} ج.م</td>
+                    <td className="p-3 text-center font-bold">{s.actualCash} ج.م</td>
+                    <td className={`p-3 text-center font-black ${diff < 0 ? 'text-danger' : diff > 0 ? 'text-success' : 'text-text-dim'}`}>
+                      {diff} ج.م
+                    </td>
+                    <td className="p-3 text-center">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const cfg = getNotificationConfig();
+                          const zMsg = `📊 *تقرير تقفيل الوردية (Z-Report)*
+🏪 *المنشأة:* ${cfg.businessName}
+👤 *الكاشير:* ${s.cashierName}
+⏰ *وقت الفتح:* ${new Date(s.openedAt).toLocaleString('ar-EG')}
+🏁 *وقت الإغلاق:* ${s.closedAt ? new Date(s.closedAt).toLocaleString('ar-EG') : '-'}
+💵 *رصيد الافتتاح:* ${s.openingCash} ج.م
+🎯 *المتوقع بالدرج:* ${s.expectedCash} ج.م
+📥 *الفعلي بالدرج:* ${s.actualCash} ج.م
+⚖️ *الفارق:* ${diff === 0 ? 'مطابق تماماً 0 ج.م ✅' : diff > 0 ? `+${diff} ج.م (زيادة)` : `${diff} ج.م (عجز ⚠️)`}`;
+                          openDirectWhatsAppChat(cfg.managerWhatsApp, zMsg, cfg.managerWhatsAppCountryCode);
+                        }}
+                        className="bg-emerald-600/20 hover:bg-emerald-600 text-emerald-400 hover:text-white px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1"
+                        title="إرسال التقرير لواتساب المدير"
+                      >
+                        <MessageSquare size={13} />
+                        <span>واتساب 📱</span>
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

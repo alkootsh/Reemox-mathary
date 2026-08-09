@@ -3,17 +3,62 @@ import { BusinessType, AppConfig } from '../types/types';
 import { safeParse } from '../lib/json';
 import ActivationPanel from './ActivationPanel';
 import UserManagement from './UserManagement';
+import DeveloperKeygenSuite from './DeveloperKeygenSuite';
 import { db } from '../lib/firebase';
 import { collection, getDocs, addDoc } from 'firebase/firestore';
 import Toast from './Toast';
-import { playSuccessSound, playWarningSound } from '../lib/sound';
+import { playSuccessSound, playWarningSound, playAlertSound } from '../lib/sound';
+import { 
+  exportFullDatabaseBackup, 
+  resetSystemDatabase, 
+  SystemResetMode,
+  saveProduct,
+  saveCustomer,
+  saveSupplier
+} from '../lib/firestoreService';
+import { POSDesignType } from './pos/POSDesignSelectorModal';
 import { 
   verifyDeveloperPassword, 
   MASTER_DEVELOPER_PASSWORD, 
-  MASTER_DEVELOPER_PASSWORD_EN,
+  MASTER_DEVELOPER_PASSWORD_EN, 
   MASTER_DEVELOPER_PIN,
   setCustomDeveloperPassword 
 } from '../lib/license';
+import { 
+  formatWhatsAppPhoneNumber, 
+  getDirectWhatsAppUrl, 
+  openDirectWhatsAppChat, 
+  sendServerNotification,
+  buildLowStockMessage,
+  buildDailySalesSummaryMessage
+} from '../lib/notifications';
+import { 
+  MessageSquare, 
+  Mail, 
+  Send, 
+  CheckCircle2, 
+  AlertTriangle, 
+  ExternalLink, 
+  RefreshCw, 
+  Smartphone, 
+  ShieldAlert, 
+  Settings as SettingsIcon,
+  Bell,
+  Check,
+  X,
+  Palette,
+  MousePointer,
+  Layout,
+  Trash2,
+  Download,
+  Upload,
+  Grid,
+  List,
+  Sparkles,
+  Zap,
+  Monitor,
+  Moon
+} from 'lucide-react';
 
 export default function Settings({ appConfig, setAppConfig }: { appConfig: AppConfig; setAppConfig: (config: AppConfig) => void; }) {
   const [businessType, setBusinessType] = useState<BusinessType>(appConfig.businessType);
@@ -60,12 +105,244 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
   const [requireSupervisorPinForPriceEdit, setRequireSupervisorPinForPriceEdit] = useState<boolean>(() => {
     return localStorage.getItem('requireSupervisorPinForPriceEdit') !== 'false';
   });
+
+  // POS Customization & Theme States
+  const [posDesign, setPosDesign] = useState<POSDesignType>(() => {
+    return (localStorage.getItem('posDesign') as POSDesignType) || 'emerald';
+  });
+  const [posTouchMode, setPosTouchMode] = useState<boolean>(() => {
+    return localStorage.getItem('posTouchMode') === 'true';
+  });
+  const [posPrimaryColor, setPosPrimaryColor] = useState<string>(() => {
+    return localStorage.getItem('posPrimaryColor') || 'emerald';
+  });
+  const [posButtonSize, setPosButtonSize] = useState<'small' | 'medium' | 'large'>(() => {
+    return (localStorage.getItem('posButtonSize') as any) || 'medium';
+  });
+  const [posViewMode, setPosViewMode] = useState<'image-grid' | 'compact-list'>(() => {
+    return (localStorage.getItem('posViewMode') as any) || 'image-grid';
+  });
+
+  // Database Reset Modal States
+  const [isResetModalOpen, setIsResetModalOpen] = useState(false);
+  const [resetMode, setResetMode] = useState<SystemResetMode>('full');
+  const [resetConfirmationInput, setResetConfirmationInput] = useState('');
+  const [isResetting, setIsResetting] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   
   const [showDevSettings, setShowDevSettings] = useState(false);
   const [devPassword, setDevPassword] = useState('');
   const [newDevPassword, setNewDevPassword] = useState('');
-  const [managerEmail, setManagerEmail] = useState(localStorage.getItem('managerEmail') || '');
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Manager Alerts & Notification Center State
+  const [managerWhatsApp, setManagerWhatsApp] = useState<string>(() => {
+    return localStorage.getItem('managerWhatsApp') || localStorage.getItem('businessPhone') || '';
+  });
+  const [managerWhatsAppCountryCode, setManagerWhatsAppCountryCode] = useState<string>(() => {
+    return localStorage.getItem('managerWhatsAppCountryCode') || '+20';
+  });
+  const [managerEmail, setManagerEmail] = useState<string>(() => {
+    return localStorage.getItem('managerEmail') || '';
+  });
+  const [notifyLowStock, setNotifyLowStock] = useState<boolean>(() => {
+    return localStorage.getItem('notify_low_stock') !== 'false';
+  });
+  const [notifyDailySummary, setNotifyDailySummary] = useState<boolean>(() => {
+    return localStorage.getItem('notify_daily_summary') !== 'false';
+  });
+  const [notifyPriceOverride, setNotifyPriceOverride] = useState<boolean>(() => {
+    return localStorage.getItem('notify_price_override') !== 'false';
+  });
+  const [notifyPurchase, setNotifyPurchase] = useState<boolean>(() => {
+    return localStorage.getItem('notify_purchase') === 'true';
+  });
+  const [notifyMethod, setNotifyMethod] = useState<'both' | 'direct-whatsapp' | 'server'>(() => {
+    return (localStorage.getItem('notify_preferred_method') as any) || 'both';
+  });
+
+  // Server Diagnostics State
+  const [serverDiagnostic, setServerDiagnostic] = useState<{
+    twilioConfigured: boolean;
+    smtpConfigured: boolean;
+    hasSid?: boolean;
+    hasToken?: boolean;
+    hasFromPhone?: boolean;
+    hasAdminPhone?: boolean;
+    fromPhone?: string;
+    adminPhone?: string;
+    smtpHost?: string;
+    smtpUser?: string;
+  } | null>(null);
+
+  const [isTestingWhatsApp, setIsTestingWhatsApp] = useState(false);
+  const [isTestingEmail, setIsTestingEmail] = useState(false);
+  const [testResult, setTestResult] = useState<{ type: 'whatsapp' | 'email'; success: boolean; message: string } | null>(null);
+
+  // Fetch Server Notification Status on load
+  const checkServerStatus = async () => {
+    try {
+      const res = await fetch('/api/notifications/status');
+      if (res.ok) {
+        const data = await res.json();
+        setServerDiagnostic({
+          twilioConfigured: data.twilio?.configured,
+          smtpConfigured: data.smtp?.configured,
+          hasSid: data.twilio?.hasSid,
+          hasToken: data.twilio?.hasToken,
+          hasFromPhone: data.twilio?.hasFromPhone,
+          hasAdminPhone: data.twilio?.hasAdminPhone,
+          fromPhone: data.twilio?.fromPhone,
+          adminPhone: data.twilio?.adminPhone,
+          smtpHost: data.smtp?.host,
+          smtpUser: data.smtp?.user
+        });
+      }
+    } catch (e) {
+      console.warn('Could not check server notification status', e);
+    }
+  };
+
+  useEffect(() => {
+    checkServerStatus();
+  }, []);
+
+  const handleSaveNotifications = () => {
+    localStorage.setItem('managerWhatsApp', managerWhatsApp.trim());
+    localStorage.setItem('managerWhatsAppCountryCode', managerWhatsAppCountryCode);
+    localStorage.setItem('managerEmail', managerEmail.trim());
+    localStorage.setItem('notify_low_stock', notifyLowStock.toString());
+    localStorage.setItem('notify_daily_summary', notifyDailySummary.toString());
+    localStorage.setItem('notify_price_override', notifyPriceOverride.toString());
+    localStorage.setItem('notify_purchase', notifyPurchase.toString());
+    localStorage.setItem('notify_preferred_method', notifyMethod);
+
+    window.dispatchEvent(new Event('managerNotificationSettingsUpdated'));
+    playSuccessSound();
+    setToast({
+      message: '✅ تم حفظ إعدادات تنبيهات واتساب والبريد الإلكتروني للمدير بنجاح!',
+      type: 'success'
+    });
+  };
+
+  // Test WhatsApp Direct (Opens wa.me immediately)
+  const handleDirectWhatsAppTest = () => {
+    if (!managerWhatsApp.trim()) {
+      playWarningSound();
+      setToast({ message: 'يرجى إدخال رقم واتساب المدير أولاً لإجراء الفحص', type: 'warning' });
+      return;
+    }
+    const testMsg = `🧪 *رسالة فحص واختبار واتساب من نظام المبيعات والمخزون*
+🏪 *المنشأة:* ${businessInfo.name || 'المتجر'}
+📅 *التاريخ:* ${new Date().toLocaleDateString('ar-EG')}
+⏰ *الوقت:* ${new Date().toLocaleTimeString('ar-EG')}
+
+✅ *تهانينا:* رقمك مفعل ومربوط بنجاح لاستقبال كافة تنبيهات نقص المخزون، تقارير المبيعات اليومية، والعمليات الحساسة فور وقوعها!`;
+
+    openDirectWhatsAppChat(managerWhatsApp, testMsg, managerWhatsAppCountryCode);
+    playSuccessSound();
+    setToast({ message: '🚀 جاري فتح محادثة واتساب المباشرة مع المدير...', type: 'success' });
+  };
+
+  // Test WhatsApp Server Dispatch (Twilio)
+  const handleServerWhatsAppTest = async () => {
+    if (!managerWhatsApp.trim()) {
+      playWarningSound();
+      setToast({ message: 'يرجى إدخال رقم واتساب المدير أولاً', type: 'warning' });
+      return;
+    }
+    setIsTestingWhatsApp(true);
+    setTestResult(null);
+
+    const formatted = formatWhatsAppPhoneNumber(managerWhatsApp, managerWhatsAppCountryCode);
+    try {
+      const res = await fetch('/api/notifications/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'whatsapp',
+          target: formatted,
+          message: `🧪 *فحص إرسال واتساب عبر السيرفر*\n✅ النظام متصل بنجاح مع هاتف المدير (+${formatted})\n⏰ ${new Date().toLocaleTimeString('ar-EG')}`
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        playSuccessSound();
+        setTestResult({
+          type: 'whatsapp',
+          success: true,
+          message: `✅ تم إرسال رسالة واتساب بنجاح عبر السيرفر إلى (+${formatted})!`
+        });
+      } else {
+        playWarningSound();
+        setTestResult({
+          type: 'whatsapp',
+          success: false,
+          message: `⚠️ تنبيه من السيرفر: ${data.reason || 'تعذر الإرسال التلقائي عبر Twilio'}. يمكنك استخدام "الإرسال المباشر عبر واتساب ويب" فهو يعمل مجاناً 100% بدون أي خادم!`
+        });
+      }
+    } catch (e: any) {
+      playWarningSound();
+      setTestResult({
+        type: 'whatsapp',
+        success: false,
+        message: 'تعذر الاتصال بخادم الإرسال. استخدم زر الإرسال المباشر لواتساب ويب.'
+      });
+    } finally {
+      setIsTestingWhatsApp(false);
+      checkServerStatus();
+    }
+  };
+
+  // Test Email Server Dispatch
+  const handleServerEmailTest = async () => {
+    if (!managerEmail.trim()) {
+      playWarningSound();
+      setToast({ message: 'يرجى إدخال البريد الإلكتروني للمدير أولاً', type: 'warning' });
+      return;
+    }
+    setIsTestingEmail(true);
+    setTestResult(null);
+
+    try {
+      const res = await fetch('/api/notifications/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: 'email',
+          target: managerEmail.trim(),
+          message: `🧪 هذا بريد إلكتروني تجريبي لتأكيد تفعيل إشعارات نظام إدارة المبيعات والمخزون للمدير (${managerEmail}).\n\nتاريخ الإرسال: ${new Date().toLocaleString('ar-EG')}`
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        playSuccessSound();
+        setTestResult({
+          type: 'email',
+          success: true,
+          message: `✅ تم إرسال بريد إلكتروني تجريبي بنجاح إلى (${managerEmail})! يرجى التحقق من صندوق الوارد أو البريد غير الهام (Spam).`
+        });
+      } else {
+        playWarningSound();
+        setTestResult({
+          type: 'email',
+          success: false,
+          message: `⚠️ سبب عدم الإرسال: ${data.reason || 'إعدادات SMTP غير مكتملة أو كلمة مرور التطبيقات في بريد الإرسال غير صحيحة'}.`
+        });
+      }
+    } catch (e) {
+      playWarningSound();
+      setTestResult({
+        type: 'email',
+        success: false,
+        message: 'فشل الاتصال بخادم البريد الإلكتروني.'
+      });
+    } finally {
+      setIsTestingEmail(false);
+      checkServerStatus();
+    }
+  };
 
   const handleSaveType = () => {
     setAppConfig({ ...appConfig, businessType });
@@ -174,57 +451,149 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
     setToast({ message: `تمت استعادة كلمة مرور المبرمج الافتراضية: ${MASTER_DEVELOPER_PASSWORD} (${MASTER_DEVELOPER_PASSWORD_EN})`, type: 'success' });
   };
 
-  const clearLocalData = () => {
-    if (confirm('هل أنت متأكد من مسح جميع بيانات التطبيق المحلية؟')) {
-        indexedDB.deleteDatabase('firestoreCached');
-        localStorage.clear();
-        window.location.reload();
+  const checkAdminPermission = (): boolean => {
+    const user = safeParse(localStorage.getItem('currentUser'), null);
+    if (!user || user.role !== 'admin') {
+      playWarningSound();
+      alert('⚠️ عذراً! هذه الخاصية مقتصرة على حساب المدير (Admin) فقط. لا تملك الصلاحية للوصول لإعدادات النظام أو تعديلها أو التصدير والمسح.');
+      return false;
     }
+    return true;
   };
 
-  const exportBackup = async () => {
+  // Save POS Theme & Layout Customization
+  const handleSavePosCustomization = () => {
+    if (!checkAdminPermission()) return;
+    localStorage.setItem('posDesign', posDesign);
+    localStorage.setItem('posTouchMode', posTouchMode.toString());
+    localStorage.setItem('posPrimaryColor', posPrimaryColor);
+    localStorage.setItem('posButtonSize', posButtonSize);
+    localStorage.setItem('posViewMode', posViewMode);
+
+    window.dispatchEvent(new Event('posCustomizationUpdated'));
+    window.dispatchEvent(new Event('posSettingsUpdated'));
+    playSuccessSound();
+    setToast({
+      message: '🎨 تم حفظ تخصيصات واجهة وألوان وأزرار شاشة البيع (POS) بنجاح!',
+      type: 'success'
+    });
+  };
+
+  // Full System Export Backup
+  const handleExportBackup = async () => {
+    if (!checkAdminPermission()) return;
+    setIsExporting(true);
     try {
-        const productsSnapshot = await getDocs(collection(db, 'products'));
-        const products = productsSnapshot.docs.map(d => d.data());
-        
-        const salesSnapshot = await getDocs(collection(db, 'sales'));
-        const sales = salesSnapshot.docs.map(d => d.data());
-        
-        const backup = { products, sales, timestamp: new Date().toISOString() };
-        const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `backup-${new Date().toISOString()}.json`;
-        a.click();
-    } catch (e) {
-        alert('خطأ في تصدير البيانات');
+      const backupData = await exportFullDatabaseBackup();
+      const jsonStr = JSON.stringify(backupData, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `backup-full-${new Date().toISOString().split('T')[0]}-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      playSuccessSound();
+      setToast({ message: '📥 تم تصدير نسخة احتياطية شاملة لكافة بيانات النظام بنجاح!', type: 'success' });
+    } catch (e: any) {
+      playWarningSound();
+      setToast({ message: `فشل تصدير البيانات: ${e.message || 'خطأ غير متوقع'}`, type: 'warning' });
+    } finally {
+      setIsExporting(false);
     }
   };
 
-  const importBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Full / Selective Database Import
+  const handleImportBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!checkAdminPermission()) return;
     const file = e.target.files?.[0];
     if (!file) return;
+    setIsImporting(true);
     const reader = new FileReader();
     reader.onload = async (event) => {
-        try {
-            const result = event.target?.result;
-            const data = safeParse(typeof result === 'string' ? result : null, { products: [] });
-            
-            if (data && data.products && Array.isArray(data.products)) {
-                for (const p of data.products) {
-                   await addDoc(collection(db, 'products'), p);
-                }
-                alert('تم استيراد المنتجات بنجاح');
-                window.location.reload();
-            } else {
-                throw new Error('Invalid format');
-            }
-        } catch (error) {
-            alert('خطأ في استيراد البيانات');
+      try {
+        const result = event.target?.result;
+        const data = safeParse(typeof result === 'string' ? result : null, null);
+        if (!data) throw new Error('الملف غير صالح أو صيغة JSON غير معتمدة');
+
+        let prodCount = 0;
+        let custCount = 0;
+        let suppCount = 0;
+
+        if (data.products && Array.isArray(data.products)) {
+          for (const p of data.products) {
+            const { id: _, ...pWithoutId } = p;
+            await saveProduct(pWithoutId);
+            prodCount++;
+          }
         }
+
+        if (data.customers && Array.isArray(data.customers)) {
+          for (const c of data.customers) {
+            const { id: _, ...cWithoutId } = c;
+            await saveCustomer(cWithoutId);
+            custCount++;
+          }
+        }
+
+        if (data.suppliers && Array.isArray(data.suppliers)) {
+          for (const s of data.suppliers) {
+            const { id: _, ...sWithoutId } = s;
+            await saveSupplier(sWithoutId);
+            suppCount++;
+          }
+        }
+
+        if (data.settings && typeof data.settings === 'object') {
+          Object.entries(data.settings).forEach(([k, v]) => {
+            if (typeof v === 'string') localStorage.setItem(k, v);
+          });
+        }
+
+        playSuccessSound();
+        setToast({ 
+          message: `✅ تم استيراد واسترجاع بيانات النسخة الاحتياطية بنجاح! (${prodCount} أصناف، ${custCount} عملاء، ${suppCount} موردين)`, 
+          type: 'success' 
+        });
+        setTimeout(() => window.location.reload(), 1500);
+      } catch (error: any) {
+        playWarningSound();
+        setToast({ message: `خطأ أثناء استيراد الملف: ${error.message}`, type: 'warning' });
+      } finally {
+        setIsImporting(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
     };
     reader.readAsText(file);
+  };
+
+  // Execute Database Wipe / Reset
+  const handleExecuteReset = async () => {
+    if (!checkAdminPermission()) return;
+    if (resetConfirmationInput.trim() !== 'مسح') {
+      playWarningSound();
+      setToast({ message: 'يرجى كتابة كلمة (مسح) في الخانة المخصصة للتأكيد أولاً', type: 'warning' });
+      return;
+    }
+
+    setIsResetting(true);
+    try {
+      await resetSystemDatabase(resetMode);
+      playSuccessSound();
+      alert(`✅ تم تنفيذ المسح بنجاح! (${
+        resetMode === 'full' ? 'تم البدء كنسخة جديدة كلياً' :
+        resetMode === 'balances_only' ? 'تم تصفير الأرصدة والكميات مع الاحتفاظ بكتالوج المنتجات والعملاء' :
+        'تم مسح سجل وحركات المبيعات والمشتريات فقط'
+      })`);
+      window.location.reload();
+    } catch (e: any) {
+      playWarningSound();
+      setToast({ message: `خطأ أثناء مسح البيانات: ${e.message}`, type: 'warning' });
+    } finally {
+      setIsResetting(false);
+      setIsResetModalOpen(false);
+      setResetConfirmationInput('');
+    }
   };
 
   const [isDark, setIsDark] = useState(() => document.documentElement.classList.contains('dark'));
@@ -307,13 +676,273 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
               <option value="weekly">أسبوعي</option>
           </select>
         </div>
-        <div>
-          <label className="text-xs text-text-dim mb-1 block">بريد المدير لتنبيهات المخزون:</label>
-          <input placeholder="بريد مدير النظام لتنبيهات المخزون" value={managerEmail} onChange={e => setManagerEmail(e.target.value)} className="bg-card2 border border-border p-3 rounded-2xl w-full" />
-        </div>
         <button onClick={handleSaveBusiness} className="w-full bg-gold hover:bg-gold2 text-white p-3 rounded-2xl font-bold transition-all shadow-md">💾 حفظ بيانات المنشأة</button>
       </div>
       
+      {/* =========================================================
+          MANAGER WHATSAPP & EMAIL NOTIFICATION HUB (مركز تنبيهات المدير)
+          ========================================================= */}
+      <div className="bg-card p-5 rounded-4xl border border-border mb-4 space-y-4 shadow-sm">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-border pb-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold">
+              <MessageSquare size={20} />
+            </div>
+            <div>
+              <h3 className="text-sm font-black flex items-center gap-2">
+                <span>مركز تنبيهات واتساب والبريد الإلكتروني للمدير</span>
+                <span className="text-[10px] bg-emerald-500/20 text-emerald-400 px-2.5 py-0.5 rounded-full font-bold">
+                  إشعارات فورية
+                </span>
+              </h3>
+              <p className="text-xs text-text-dim">إرسال تقارير المبيعات اليومية ونواقص المخزون والتنبيهات الحساسة للمدير</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 self-end sm:self-auto">
+            <button
+              type="button"
+              onClick={checkServerStatus}
+              className="text-[11px] bg-card2 hover:bg-slate-700 text-text-dim hover:text-white px-2.5 py-1 rounded-xl border border-border flex items-center gap-1 transition-all"
+              title="تحديث حالة الخوادم"
+            >
+              <RefreshCw size={11} />
+              <span>فحص الاتصال</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Informative Explanation Banner */}
+        <div className="bg-emerald-500/10 border border-emerald-500/30 p-3 rounded-2xl flex items-start gap-2.5 text-xs text-emerald-200 leading-relaxed">
+          <CheckCircle2 size={18} className="text-emerald-400 flex-shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <p className="font-bold text-emerald-300">طريقة عمل الإشعارات (مباشرة 100% وتلقائية):</p>
+            <p className="text-[11px] text-emerald-200/90">
+              • <strong>واتساب المباشر (Direct WhatsApp):</strong> يعمل فوراً وبدون أي اشتراكات أو خوادم خارجية — يفتح محادثة واتساب منسقة بضغطة زر أو نافذة سريعة عند حدوث نقص مخزون أو تقفيل الوردية.
+              <br />
+              • <strong>الإرسال التلقائي عبر السيرفر:</strong> يدعم خادم Twilio لواتساب وخادم SMTP للبريد الإلكتروني عند توفر بيانات الربط.
+            </p>
+          </div>
+        </div>
+
+        {/* WhatsApp & Email Inputs */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {/* WhatsApp Phone Number */}
+          <div className="bg-card2 p-3.5 rounded-2xl border border-border space-y-2">
+            <label className="text-xs font-bold flex items-center gap-1.5 text-emerald-400">
+              <Smartphone size={15} />
+              <span>رقم واتساب المدير (لاستقبال التنبيهات):</span>
+            </label>
+            <div className="flex gap-1.5">
+              <select
+                value={managerWhatsAppCountryCode}
+                onChange={e => setManagerWhatsAppCountryCode(e.target.value)}
+                className="bg-card border border-border p-2.5 rounded-xl text-xs font-mono font-bold w-28 text-center"
+              >
+                <option value="+20">🇪🇬 مصر (+20)</option>
+                <option value="+966">🇸🇦 السعودية (+966)</option>
+                <option value="+971">🇦🇪 الإمارات (+971)</option>
+                <option value="+965">🇰🇼 الكويت (+965)</option>
+                <option value="+974">🇶🇦 قطر (+974)</option>
+                <option value="+968">🇴🇲 عمان (+968)</option>
+                <option value="+962">🇯🇴 الأردن (+962)</option>
+                <option value="+964">🇮🇶 العراق (+964)</option>
+                <option value="+218">🇱🇾 ليبيا (+218)</option>
+                <option value="+249">🇸🇩 السودان (+249)</option>
+                <option value="+970">🇵🇸 فلسطين (+970)</option>
+                <option value="+961">🇱🇧 لبنان (+961)</option>
+                <option value="+212">🇲🇦 المغرب (+212)</option>
+                <option value="+213">🇩🇿 الجزائر (+213)</option>
+                <option value="+216">🇹🇳 تونس (+216)</option>
+                <option value="+1">🇺🇸 أمريكا / كندا (+1)</option>
+                <option value="+44">🇬🇧 بريطانيا (+44)</option>
+              </select>
+              <input
+                type="tel"
+                placeholder="مثال: 01012345678"
+                value={managerWhatsApp}
+                onChange={e => setManagerWhatsApp(e.target.value)}
+                className="bg-card border border-border p-2.5 rounded-xl flex-1 text-xs font-mono font-bold"
+              />
+            </div>
+            {managerWhatsApp.trim() && (
+              <p className="text-[10px] text-text-dim flex items-center gap-1 font-mono">
+                <span>الصيغة الدولية:</span>
+                <span className="text-emerald-400 font-bold">
+                  +{formatWhatsAppPhoneNumber(managerWhatsApp, managerWhatsAppCountryCode)}
+                </span>
+              </p>
+            )}
+          </div>
+
+          {/* Manager Email */}
+          <div className="bg-card2 p-3.5 rounded-2xl border border-border space-y-2">
+            <label className="text-xs font-bold flex items-center gap-1.5 text-blue-400">
+              <Mail size={15} />
+              <span>البريد الإلكتروني للمدير (Email Alerts):</span>
+            </label>
+            <input
+              type="email"
+              placeholder="manager@my-company.com"
+              value={managerEmail}
+              onChange={e => setManagerEmail(e.target.value)}
+              className="bg-card border border-border p-2.5 rounded-xl w-full text-xs font-mono"
+            />
+            <p className="text-[10px] text-text-dim">
+              يستخدم لإرسال التقارير اليومية وتنبيهات نقص المخزون عبر البريد.
+            </p>
+          </div>
+        </div>
+
+        {/* Notification Types (Toggles) */}
+        <div>
+          <label className="block text-xs font-bold text-text-dim mb-2">أنواع الإشعارات المراد إرسالها:</label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <label className="flex items-center justify-between gap-2 bg-card2 p-3 rounded-2xl border border-border cursor-pointer hover:border-emerald-500/40 transition-all text-xs">
+              <div className="space-y-0.5">
+                <span className="font-bold flex items-center gap-1.5 text-rose-400">
+                  <span>🚨</span>
+                  <span>تنبيه نقص المخزون الحرج</span>
+                </span>
+                <p className="text-[10px] text-text-dim">عندما يصل رصيد المنتج للحد الأدنى (حد الطلب)</p>
+              </div>
+              <input
+                type="checkbox"
+                checked={notifyLowStock}
+                onChange={e => setNotifyLowStock(e.target.checked)}
+                className="w-4 h-4 rounded text-emerald-500 accent-emerald-500"
+              />
+            </label>
+
+            <label className="flex items-center justify-between gap-2 bg-card2 p-3 rounded-2xl border border-border cursor-pointer hover:border-emerald-500/40 transition-all text-xs">
+              <div className="space-y-0.5">
+                <span className="font-bold flex items-center gap-1.5 text-amber-400">
+                  <span>📊</span>
+                  <span>تقرير المبيعات والوردية اليومي</span>
+                </span>
+                <p className="text-[10px] text-text-dim">ملخص الإيراد والأرباح عند تقفيل الوردية أو نهاية اليوم</p>
+              </div>
+              <input
+                type="checkbox"
+                checked={notifyDailySummary}
+                onChange={e => setNotifyDailySummary(e.target.checked)}
+                className="w-4 h-4 rounded text-emerald-500 accent-emerald-500"
+              />
+            </label>
+
+            <label className="flex items-center justify-between gap-2 bg-card2 p-3 rounded-2xl border border-border cursor-pointer hover:border-emerald-500/40 transition-all text-xs">
+              <div className="space-y-0.5">
+                <span className="font-bold flex items-center gap-1.5 text-yellow-400">
+                  <span>⚠️</span>
+                  <span>تنبيه تعديل الأسعار بالكاشير</span>
+                </span>
+                <p className="text-[10px] text-text-dim">عند بيع صنف بسعر معدل أو تجاوز سعر التكلفة</p>
+              </div>
+              <input
+                type="checkbox"
+                checked={notifyPriceOverride}
+                onChange={e => setNotifyPriceOverride(e.target.checked)}
+                className="w-4 h-4 rounded text-emerald-500 accent-emerald-500"
+              />
+            </label>
+
+            <label className="flex items-center justify-between gap-2 bg-card2 p-3 rounded-2xl border border-border cursor-pointer hover:border-emerald-500/40 transition-all text-xs">
+              <div className="space-y-0.5">
+                <span className="font-bold flex items-center gap-1.5 text-blue-400">
+                  <span>📦</span>
+                  <span>تنبيه فواتير المشتريات والتوريد</span>
+                </span>
+                <p className="text-[10px] text-text-dim">عند تسجيل فاتورة شراء جديدة أو إدخال بضاعة للمخزن</p>
+              </div>
+              <input
+                type="checkbox"
+                checked={notifyPurchase}
+                onChange={e => setNotifyPurchase(e.target.checked)}
+                className="w-4 h-4 rounded text-emerald-500 accent-emerald-500"
+              />
+            </label>
+          </div>
+        </div>
+
+        {/* Server Status Summary Badge */}
+        <div className="bg-card2 p-3 rounded-2xl border border-border flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-3">
+            <span className="text-text-dim">حالة قنوات الإرسال:</span>
+            <span className="flex items-center gap-1 bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded-lg font-bold text-[11px] border border-emerald-500/20">
+              <Check size={12} />
+              <span>واتساب المباشر: جاهز ومفعل 🟢</span>
+            </span>
+            <span className={`flex items-center gap-1 px-2 py-0.5 rounded-lg font-bold text-[11px] border ${serverDiagnostic?.twilioConfigured ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-slate-800 text-text-dim border-border'}`}>
+              {serverDiagnostic?.twilioConfigured ? <Check size={12} /> : <X size={12} />}
+              <span>خادم Twilio WhatsApp: {serverDiagnostic?.twilioConfigured ? 'متصل' : 'غير مهيأ'}</span>
+            </span>
+            <span className={`flex items-center gap-1 px-2 py-0.5 rounded-lg font-bold text-[11px] border ${serverDiagnostic?.smtpConfigured ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-slate-800 text-text-dim border-border'}`}>
+              {serverDiagnostic?.smtpConfigured ? <Check size={12} /> : <X size={12} />}
+              <span>خادم SMTP البريد: {serverDiagnostic?.smtpConfigured ? 'متصل' : 'غير مهيأ'}</span>
+            </span>
+          </div>
+        </div>
+
+        {/* Live Testing & Action Buttons */}
+        <div className="space-y-2 pt-1">
+          <label className="block text-xs font-bold text-text-dim">أدوات الفحص والتجربة المباشرة:</label>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {/* Direct WhatsApp Test Button */}
+            <button
+              type="button"
+              onClick={handleDirectWhatsAppTest}
+              className="bg-emerald-600 hover:bg-emerald-500 text-white p-3 rounded-2xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-98"
+            >
+              <ExternalLink size={14} />
+              <span>تجربة واتساب مباشر (ويب/موبايل) 📱</span>
+            </button>
+
+            {/* Server WhatsApp Test Button */}
+            <button
+              type="button"
+              onClick={handleServerWhatsAppTest}
+              disabled={isTestingWhatsApp}
+              className="bg-card2 hover:bg-slate-700 text-emerald-400 border border-emerald-500/40 p-3 rounded-2xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
+            >
+              <Send size={14} />
+              <span>{isTestingWhatsApp ? 'جاري فحص Twilio...' : 'فحص إرسال Twilio السيرفر 🚀'}</span>
+            </button>
+
+            {/* Email Test Button */}
+            <button
+              type="button"
+              onClick={handleServerEmailTest}
+              disabled={isTestingEmail}
+              className="bg-card2 hover:bg-slate-700 text-blue-400 border border-blue-500/40 p-3 rounded-2xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
+            >
+              <Mail size={14} />
+              <span>{isTestingEmail ? 'جاري إرسال البريد...' : 'فحص إرسال الإيميل التجريبي ✉️'}</span>
+            </button>
+          </div>
+
+          {/* Test Result Message Box */}
+          {testResult && (
+            <div className={`p-3 rounded-2xl border text-xs flex items-start gap-2 animate-fadeIn ${testResult.success ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300' : 'bg-amber-500/10 border-amber-500/40 text-amber-300'}`}>
+              {testResult.success ? <CheckCircle2 size={16} className="flex-shrink-0 mt-0.5" /> : <AlertTriangle size={16} className="flex-shrink-0 mt-0.5" />}
+              <div className="flex-1">
+                <p className="font-bold">{testResult.success ? 'نتيجة الفحص ناجحة:' : 'تنبيه الفحص والتشخيص:'}</p>
+                <p className="text-[11px] mt-0.5 leading-relaxed">{testResult.message}</p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Save Notifications Button */}
+        <button
+          type="button"
+          onClick={handleSaveNotifications}
+          className="w-full bg-emerald-600 hover:bg-emerald-500 text-white p-3.5 rounded-2xl font-black transition-all shadow-lg active:scale-98 flex items-center justify-center gap-2"
+        >
+          <span>💾</span>
+          <span>حفظ إعدادات تنبيهات واتساب والإيميل للمدير</span>
+        </button>
+      </div>
+
       {/* =========================================================
           TAX & VAT SETTINGS (إعدادات الضريبة والقيمة المضافة)
           ========================================================= */}
@@ -598,26 +1227,457 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
         <button onClick={handleSavePrint} className="w-full bg-gold hover:bg-gold2 text-white p-3 rounded-2xl font-bold transition-all shadow-md">💾 حفظ إعدادات الطباعة</button>
       </div>
 
-      {/* Backup & Session Control */}
-      <div className="bg-card p-5 rounded-4xl border border-border mb-4 space-y-2">
-        <h3 className="text-sm font-bold mb-2 flex items-center gap-2">
+      {/* =========================================================
+          POS CUSTOMIZATION & THEME SETTINGS (تخصيص واجهة وألوان وأحجام أزرار POS)
+          ========================================================= */}
+      <div className="bg-card p-5 rounded-4xl border border-border mb-4 space-y-5 shadow-sm">
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-border pb-3">
+          <div className="flex items-center gap-2.5">
+            <div className="w-9 h-9 rounded-xl bg-gold/20 text-gold flex items-center justify-center font-bold">
+              <Palette size={20} />
+            </div>
+            <div>
+              <h3 className="text-sm font-black flex items-center gap-2 text-text-main">
+                <span>تخصيص واجهة وألوان وأحجام أزرار شاشة البيع (POS)</span>
+                <span className="text-[10px] bg-gold/20 text-gold px-2.5 py-0.5 rounded-full font-bold">
+                  تحكم كامل بالمظهر
+                </span>
+              </h3>
+              <p className="text-xs text-text-dim">تعديل التصميم الرئيسي، وضع اللمس، حجم الأزرار، ونمط العرض للمتجر</p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={handleSavePosCustomization}
+            className="bg-gold hover:bg-gold2 text-black px-4 py-2 rounded-xl text-xs font-black transition-all shadow-md flex items-center gap-1.5 self-end sm:self-auto active:scale-98"
+          >
+            <span>💾</span>
+            <span>حفظ تخصيصات الشاشة</span>
+          </button>
+        </div>
+
+        {/* 1. POS Layout Gallery (معرض أشكال الواجهة) */}
+        <div className="space-y-2">
+          <label className="text-xs font-bold text-text-main flex items-center gap-1.5">
+            <Layout size={15} className="text-gold" />
+            <span>معرض خيارات واجهة شاشة البيع (POS Layout Gallery):</span>
+          </label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            {[
+              {
+                id: 'emerald' as POSDesignType,
+                title: 'تصميم الشبكة الحديث',
+                desc: 'شكل الزمردي الحديث مع أزرار لمس كبيرة وبطاقة سريعة',
+                icon: Sparkles,
+                badge: 'الحديث ✨',
+                color: 'border-emerald-500 text-emerald-400 bg-emerald-500/10'
+              },
+              {
+                id: 'classic' as POSDesignType,
+                title: 'القائمة الكلاسيكية',
+                desc: 'النمط المكتبي الشامل للهايبر ماركت مع التركيز على الباركود',
+                icon: Monitor,
+                badge: 'ERP المكتبي',
+                color: 'border-blue-500 text-blue-400 bg-blue-500/10'
+              },
+              {
+                id: 'touch' as POSDesignType,
+                title: 'تصميم الإدخال السريع',
+                desc: 'شاشة لمس فائقة السرعة بلمسة واحدة بدون لوحة مفاتيح',
+                icon: Zap,
+                badge: 'التاتش السريع',
+                color: 'border-amber-500 text-amber-400 bg-amber-500/10'
+              },
+              {
+                id: 'dark' as POSDesignType,
+                title: 'التصميم الليلي الفاخر',
+                desc: 'واجهة داكنة مريحة مع تفاصيل ذهبية أنيقة ونوافق نيون',
+                icon: Moon,
+                badge: 'الوضع الليلي',
+                color: 'border-gold text-gold bg-gold/10'
+              }
+            ].map((layout) => {
+              const isSelected = posDesign === layout.id;
+              const IconComponent = layout.icon;
+
+              return (
+                <div
+                  key={layout.id}
+                  onClick={() => setPosDesign(layout.id)}
+                  className={`p-3.5 rounded-2xl border-2 transition-all cursor-pointer flex flex-col justify-between ${
+                    isSelected
+                      ? 'border-gold bg-gold/10 shadow-md scale-[1.02]'
+                      : 'border-border bg-card2 hover:border-text-dim/50'
+                  }`}
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <div className="p-2 rounded-xl bg-card">
+                        <IconComponent size={18} className={isSelected ? 'text-gold' : 'text-text-dim'} />
+                      </div>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${layout.color}`}>
+                        {layout.badge}
+                      </span>
+                    </div>
+
+                    <div>
+                      <h4 className="text-xs font-black text-text-main flex items-center justify-between">
+                        <span>{layout.title}</span>
+                        {isSelected && <Check size={14} className="text-gold font-bold" />}
+                      </h4>
+                      <p className="text-[10px] text-text-dim leading-relaxed mt-1">{layout.desc}</p>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 2. Touch-Friendly Mode & View Mode Switcher */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
+          {/* Touch Mode Toggle */}
+          <label className="flex items-start justify-between gap-3 p-3.5 bg-card2 rounded-2xl border border-border cursor-pointer hover:border-gold/40 transition-all">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 font-bold text-xs text-text-main">
+                <MousePointer size={16} className="text-gold" />
+                <span>وضع 'اللمس المكثف' (Touch-Friendly Mode)</span>
+              </div>
+              <p className="text-[11px] text-text-dim pr-6 leading-relaxed">
+                تكبير مناطق النقر (Hit-areas) وزيادة المسافات بين أزرار الأصناف لتسهيل استخدام الشاشات اللمسية والأصابع بدون أخطاء.
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              checked={posTouchMode}
+              onChange={e => setPosTouchMode(e.target.checked)}
+              className="mt-1 rounded w-5 h-5 text-gold accent-gold cursor-pointer flex-shrink-0"
+            />
+          </label>
+
+          {/* View Mode Switcher (Grid vs Compact List) */}
+          <div className="p-3.5 bg-card2 rounded-2xl border border-border space-y-2">
+            <label className="block text-xs font-bold text-text-main flex items-center gap-1.5">
+              <Layout size={15} className="text-gold" />
+              <span>ترتيب وعرض الأصناف (Layout Switcher):</span>
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setPosViewMode('image-grid')}
+                className={`p-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                  posViewMode === 'image-grid'
+                    ? 'bg-gold text-black border-gold shadow-sm'
+                    : 'bg-card text-text-dim border-border hover:text-text-main'
+                }`}
+              >
+                <Grid size={14} />
+                <span>نمط صورة المنتج (Grid)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setPosViewMode('compact-list')}
+                className={`p-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-1.5 transition-all ${
+                  posViewMode === 'compact-list'
+                    ? 'bg-gold text-black border-gold shadow-sm'
+                    : 'bg-card text-text-dim border-border hover:text-text-main'
+                }`}
+              >
+                <List size={14} />
+                <span>القائمة المختصرة (List)</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* 3. Button Size according to Shop Nature */}
+        <div className="space-y-2">
+          <label className="text-xs font-bold text-text-main block">
+            أحجام أزرار المنتجات وحجم الأيقونات (لتتناسب مع طبيعة المتجر):
+          </label>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            {[
+              {
+                id: 'small' as const,
+                title: '🛒 صغير / مكثف (Hypermarket)',
+                desc: 'أزرار صغيرة مدمجة تناسب السوبر ماركت والهايبر ذات الأصناف الكثيرة جداً'
+              },
+              {
+                id: 'medium' as const,
+                title: '🏪 متوسط / متوازن (General Retail)',
+                desc: 'الحجم الافتراضي المعتمد للمحلات التجارية العامة والمتاجر'
+              },
+              {
+                id: 'large' as const,
+                title: '👕 كبير / لمس ممتاز (Clothing & Cafe)',
+                desc: 'أزرار كبيرة بمساحة لمس واسعة تناسب محلات الملابس والمطاعم والكافيهات'
+              }
+            ].map((btnOption) => (
+              <button
+                key={btnOption.id}
+                type="button"
+                onClick={() => setPosButtonSize(btnOption.id)}
+                className={`p-3 rounded-2xl border text-right transition-all ${
+                  posButtonSize === btnOption.id
+                    ? 'border-gold bg-gold/10 font-bold text-text-main'
+                    : 'border-border bg-card2 text-text-dim hover:border-text-dim/40'
+                }`}
+              >
+                <div className="flex items-center gap-1.5 font-bold text-xs mb-1">
+                  <span>{posButtonSize === btnOption.id ? '🔘' : '⚪'}</span>
+                  <span>{btnOption.title}</span>
+                </div>
+                <p className="text-[10px] text-text-dim pr-5 leading-relaxed">{btnOption.desc}</p>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* 4. POS Theme Colors */}
+        <div className="space-y-2">
+          <label className="text-xs font-bold text-text-main block">اللون الأساسي لشاشة البيع (POS Primary Theme Color):</label>
+          <div className="flex flex-wrap gap-2">
+            {[
+              { id: 'emerald', name: 'الزمردي (الأخضر)', bg: 'bg-emerald-600' },
+              { id: 'blue', name: 'الأزرق الملكي', bg: 'bg-blue-600' },
+              { id: 'gold', name: 'الذهبي / العنبر', bg: 'bg-amber-500' },
+              { id: 'rose', name: 'الياقوتي (الأحمر)', bg: 'bg-rose-600' },
+              { id: 'slate', name: 'الداكن الأنيق', bg: 'bg-slate-700' }
+            ].map((colorObj) => (
+              <button
+                key={colorObj.id}
+                type="button"
+                onClick={() => setPosPrimaryColor(colorObj.id)}
+                className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-2 border transition-all ${
+                  posPrimaryColor === colorObj.id
+                    ? 'border-gold bg-card shadow-md text-text-main'
+                    : 'border-border bg-card2 text-text-dim hover:text-text-main'
+                }`}
+              >
+                <span className={`w-3.5 h-3.5 rounded-full ${colorObj.bg}`} />
+                <span>{colorObj.name}</span>
+                {posPrimaryColor === colorObj.id && <Check size={12} className="text-gold" />}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleSavePosCustomization}
+          className="w-full bg-gold hover:bg-gold2 text-black p-3.5 rounded-2xl font-black transition-all shadow-md flex items-center justify-center gap-2 active:scale-98"
+        >
           <span>💾</span>
-          <span>النسخ الاحتياطي وإدارة البيانات</span>
-        </h3>
-        <button onClick={exportBackup} className="w-full bg-blue-600 hover:bg-blue-500 text-white p-3 rounded-2xl font-bold mb-2 transition-all flex items-center justify-center gap-2">
-          <span>📥</span>
-          <span>تصدير نسخة احتياطية كاملة (JSON Backup)</span>
-        </button>
-        <input type="file" ref={fileInputRef} onChange={importBackup} className="hidden" />
-        <button onClick={() => fileInputRef.current?.click()} className="w-full bg-green-600 hover:bg-green-500 text-white p-3 rounded-2xl font-bold mb-2 transition-all flex items-center justify-center gap-2">
-          <span>📤</span>
-          <span>استيراد واسترجاع نسخة احتياطية (JSON)</span>
-        </button>
-        <button onClick={clearLocalData} className="w-full bg-red-600/90 hover:bg-red-600 text-white p-3 rounded-2xl font-bold mb-2 transition-all flex items-center justify-center gap-2">
-          <span>🗑️</span>
-          <span>مسح بيانات الجلسة المحلية وإعادة الضبط</span>
+          <span>حفظ وتطبيق إعدادات شاشة البيع الآن</span>
         </button>
       </div>
+
+      {/* Printing Settings */}
+      <div className="bg-card p-5 rounded-4xl border border-border mb-4 space-y-3">
+        <h3 className="text-sm font-bold flex items-center gap-2">
+          <span>🖨️</span>
+          <span>إعدادات الطباعة</span>
+        </h3>
+        <div>
+          <label className="text-xs text-text-dim mb-1 block">مقاس ورق الطباعة الافتراضي:</label>
+          <select value={printSettings.paperSize} onChange={e => setPrintSettings({...printSettings, paperSize: e.target.value})} className="bg-card2 border border-border p-3 rounded-2xl w-full">
+              <option value="A4">A4 (ورق قياسي للمكاتب)</option>
+              <option value="80mm">حراري (80mm Thermal POS)</option>
+              <option value="58mm">حراري صغير (58mm Thermal POS)</option>
+          </select>
+        </div>
+        <label className='flex items-center gap-2 p-2 bg-card2 rounded-xl text-xs font-bold cursor-pointer'>
+            <input type='checkbox' checked={printSettings.showLogo} onChange={e => setPrintSettings({...printSettings, showLogo: e.target.checked})} className="rounded" />
+            إظهار شعار المنشأة أعلى الفاتورة المطبوعة
+        </label>
+        <button onClick={handleSavePrint} className="w-full bg-gold hover:bg-gold2 text-white p-3 rounded-2xl font-bold transition-all shadow-md">💾 حفظ إعدادات الطباعة</button>
+      </div>
+
+      {/* Backup & Session Control */}
+      <div className="bg-card p-5 rounded-4xl border border-border mb-4 space-y-3 shadow-sm">
+        <div className="flex items-center justify-between border-b border-border pb-3">
+          <div className="flex items-center gap-2">
+            <span className="text-xl">💾</span>
+            <div>
+              <h3 className="text-sm font-bold text-text-main">النسخ الاحتياطي ومسح وإعادة ضبط البيانات</h3>
+              <p className="text-xs text-text-dim">تصدير النسخة الاحتياطية وإعادة تعيين قاعدة البيانات بخيارات متعددة</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          {/* Export Full Backup */}
+          <button
+            type="button"
+            onClick={handleExportBackup}
+            disabled={isExporting}
+            className="bg-blue-600 hover:bg-blue-500 text-white p-3.5 rounded-2xl font-bold text-xs transition-all flex items-center justify-center gap-2 shadow-md active:scale-98 disabled:opacity-50"
+          >
+            <Download size={16} />
+            <span>{isExporting ? 'جاري تصدير النسخة الاحتياطية...' : 'تصدير نسخة احتياطية كاملة (JSON)'}</span>
+          </button>
+
+          {/* Import Backup */}
+          <input type="file" ref={fileInputRef} onChange={handleImportBackup} accept=".json" className="hidden" />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={isImporting}
+            className="bg-emerald-600 hover:bg-emerald-500 text-white p-3.5 rounded-2xl font-bold text-xs transition-all flex items-center justify-center gap-2 shadow-md active:scale-98 disabled:opacity-50"
+          >
+            <Upload size={16} />
+            <span>{isImporting ? 'جاري استيراد النسخة...' : 'استيراد واسترجاع نسخة احتياطية (JSON)'}</span>
+          </button>
+        </div>
+
+        {/* Clear & Reset Database Button */}
+        <button
+          type="button"
+          onClick={() => {
+            if (checkAdminPermission()) {
+              setIsResetModalOpen(true);
+            }
+          }}
+          className="w-full bg-red-600/90 hover:bg-red-600 text-white p-3.5 rounded-2xl font-black text-xs transition-all flex items-center justify-center gap-2 shadow-md active:scale-98 border border-red-500/30"
+        >
+          <Trash2 size={16} />
+          <span>مسح وإعادة ضبط قاعدة البيانات والسيستم (Wipe & Reset)</span>
+        </button>
+      </div>
+
+      {/* Database Reset Interactive Modal */}
+      {isResetModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-card max-w-xl w-full rounded-3xl border border-red-500/40 p-6 space-y-5 shadow-2xl animate-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2 text-red-400">
+                <Trash2 size={22} />
+                <h3 className="text-lg font-black">خيارات مسح وإعادة ضبط قاعدة البيانات</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsResetModalOpen(false)}
+                className="p-1.5 rounded-xl bg-card2 hover:bg-border text-text-dim"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Explanation Warning */}
+            <div className="bg-red-500/10 border border-red-500/30 p-3.5 rounded-2xl text-xs text-red-200 leading-relaxed space-y-1">
+              <p className="font-bold text-red-300 flex items-center gap-1.5">
+                <AlertTriangle size={16} />
+                <span>تنبيه هام جداً قبل المسح:</span>
+              </p>
+              <p>
+                اختر نوع المسح المطلوب بعناية. نوصي بتصدير نسخة احتياطية (JSON) قبل متابعة العملية.
+              </p>
+            </div>
+
+            {/* Reset Options Selector */}
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-text-main block">اختر نوع المسح المطلوب تنفيذها:</label>
+              
+              <div className="space-y-2">
+                {/* Mode 1: Full Wipe */}
+                <button
+                  type="button"
+                  onClick={() => setResetMode('full')}
+                  className={`w-full p-3.5 rounded-2xl border text-right transition-all flex items-start gap-3 ${
+                    resetMode === 'full'
+                      ? 'border-red-500 bg-red-500/15 font-bold text-text-main'
+                      : 'border-border bg-card2 text-text-dim hover:border-red-500/40'
+                  }`}
+                >
+                  <span className="text-lg">🔴</span>
+                  <div className="space-y-0.5">
+                    <h4 className="text-xs font-black text-red-400">1. مسح كامل كنسخة جديدة (Full System Wipe)</h4>
+                    <p className="text-[11px] text-text-dim leading-relaxed">
+                      مسح كافة المنتجات، المبيعات، العملاء، الموردين، والأنشطة كلياً كأنك تستخدم النظام لأول مرة.
+                    </p>
+                  </div>
+                </button>
+
+                {/* Mode 2: Reset Balances Only */}
+                <button
+                  type="button"
+                  onClick={() => setResetMode('balances_only')}
+                  className={`w-full p-3.5 rounded-2xl border text-right transition-all flex items-start gap-3 ${
+                    resetMode === 'balances_only'
+                      ? 'border-amber-500 bg-amber-500/15 font-bold text-text-main'
+                      : 'border-border bg-card2 text-text-dim hover:border-amber-500/40'
+                  }`}
+                >
+                  <span className="text-lg">🟡</span>
+                  <div className="space-y-0.5">
+                    <h4 className="text-xs font-black text-amber-400">2. مسح الأرصدة والكميات فقط (Reset Stock & Accounts)</h4>
+                    <p className="text-[11px] text-text-dim leading-relaxed">
+                      تصفير كميات المنتجات بالمخزن وأرصدة العملاء والموردين، وحذف سجل المبيعات، مع <strong>حفظ قائمة الأصناف وأسماء العملاء</strong>.
+                    </p>
+                  </div>
+                </button>
+
+                {/* Mode 3: Reset Sales & Purchases History Only */}
+                <button
+                  type="button"
+                  onClick={() => setResetMode('sales_purchases_only')}
+                  className={`w-full p-3.5 rounded-2xl border text-right transition-all flex items-start gap-3 ${
+                    resetMode === 'sales_purchases_only'
+                      ? 'border-blue-500 bg-blue-500/15 font-bold text-text-main'
+                      : 'border-border bg-card2 text-text-dim hover:border-blue-500/40'
+                  }`}
+                >
+                  <span className="text-lg">🔵</span>
+                  <div className="space-y-0.5">
+                    <h4 className="text-xs font-black text-blue-400">3. مسح حركات المبيعات والمشتريات فقط (Transaction History Only)</h4>
+                    <p className="text-[11px] text-text-dim leading-relaxed">
+                      حذف سجل الفواتير والمبيعات والمشتريات فقط، مع <strong>الحفاظ الكامل على الأصناف والكميات الحالية بالمخزن والأرصدة</strong>.
+                    </p>
+                  </div>
+                </button>
+              </div>
+            </div>
+
+            {/* Confirmation input */}
+            <div className="space-y-1 pt-2 border-t border-border">
+              <label className="text-xs font-bold text-text-main block">
+                للتأكيد النهائي، اكتب كلمة <code className="text-red-400 font-bold bg-red-500/10 px-2 py-0.5 rounded">مسح</code> في الخانة التالية:
+              </label>
+              <input
+                type="text"
+                placeholder="اكتب كلمة: مسح"
+                value={resetConfirmationInput}
+                onChange={e => setResetConfirmationInput(e.target.value)}
+                className="w-full bg-card2 border border-border p-3 rounded-2xl text-xs font-bold text-center text-red-400 focus:border-red-500"
+              />
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={handleExecuteReset}
+                disabled={isResetting || resetConfirmationInput.trim() !== 'مسح'}
+                className="flex-1 bg-red-600 hover:bg-red-500 text-white p-3.5 rounded-2xl font-black text-xs transition-all disabled:opacity-40 flex items-center justify-center gap-1.5 shadow-lg"
+              >
+                <Trash2 size={16} />
+                <span>{isResetting ? 'جاري تنفيذ المسح...' : 'تأكيد وتنفيذ المسح الآن'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsResetModalOpen(false)}
+                className="px-5 bg-card2 hover:bg-border text-text-main p-3.5 rounded-2xl font-bold text-xs transition-all border border-border"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       
       {/* User Management & Activation Panel */}
       <UserManagement />
@@ -742,6 +1802,11 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
                       </label>
                   ))}
               </div>
+            </div>
+
+            {/* Developer Keygen Suite Component */}
+            <div className="border-t border-border pt-4">
+              <DeveloperKeygenSuite />
             </div>
 
             <button onClick={handleSaveType} className="w-full bg-green-600 hover:bg-green-500 text-white p-3.5 rounded-2xl font-bold transition-all shadow-md">

@@ -1,0 +1,43 @@
+{
+  "appId": "com.maro.pos.accounting",
+  "productName": "MARO Lite POS & ERP",
+  "copyright": "Copyright © 2026 MARO Systems",
+  "directories": {
+    "output": "dist-desktop",
+    "buildResources": "build"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*",
+    "package.json"
+  ],
+  "main": "electron/main.cjs",
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64", "ia32"]
+      },
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "public/favicon.ico",
+    "requestedExecutionLevel": "asInvoker"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "allowElevation": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "MARO Lite POS",
+    "installerIcon": "public/favicon.ico",
+    "uninstallerIcon": "public/favicon.ico",
+    "installerHeaderTitle": "برنامج MARO للمحاسبة وإدارة نقاط البيع",
+    "deleteAppDataOnUninstall": false,
+    "runAfterFinish": true
+  },
+  "asar": true
+}

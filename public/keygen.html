@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MARO Systems - مولد التراخيص وأكواد التفعيل الرئيسية للمبرمج (Master Keygen)</title>
+  <style>
+    :root {
+      --bg: #0B0F19;
+      --card: #151D2E;
+      --card-2: #1E293B;
+      --border: #334155;
+      --gold: #F59E0B;
+      --gold-hover: #D97706;
+      --accent: #38BDF8;
+      --green: #10B981;
+      --red: #EF4444;
+      --text: #F8FAFC;
+      --text-dim: #94A3B8;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      padding: 24px 16px;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .container {
+      width: 100%;
+      max-width: 860px;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+    .badge {
+      display: inline-block;
+      background: rgba(245, 158, 11, 0.15);
+      color: var(--gold);
+      border: 1px solid rgba(245, 158, 11, 0.4);
+      padding: 4px 12px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+    h1 {
+      font-size: 24px;
+      color: var(--gold);
+      margin-bottom: 6px;
+    }
+    p.subtitle {
+      font-size: 13px;
+      color: var(--text-dim);
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
+    }
+    .card-title {
+      font-size: 16px;
+      font-weight: bold;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 640px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .form-group {
+      margin-bottom: 16px;
+    }
+    label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-dim);
+      margin-bottom: 6px;
+    }
+    input, select {
+      width: 100%;
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    input:focus, select:focus {
+      border-color: var(--gold);
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background: var(--gold);
+      color: #000;
+      font-weight: bold;
+      font-size: 14px;
+      padding: 12px 20px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+      width: 100%;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .btn:hover {
+      background: var(--gold-hover);
+    }
+    .btn:active {
+      transform: scale(0.98);
+    }
+    .btn-secondary {
+      background: var(--card-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-secondary:hover {
+      background: #273549;
+    }
+    .result-box {
+      background: #0D131F;
+      border: 1px dashed var(--gold);
+      border-radius: 12px;
+      padding: 16px;
+      margin-top: 16px;
+      display: none;
+    }
+    .key-display {
+      font-family: 'Courier New', monospace;
+      font-size: 18px;
+      font-weight: bold;
+      color: #34D399;
+      background: rgba(16, 185, 129, 0.1);
+      padding: 12px;
+      border-radius: 8px;
+      text-align: center;
+      word-break: break-all;
+      margin: 10px 0;
+      user-select: all;
+    }
+    .certificate {
+      background: #FFFFFF;
+      color: #111827;
+      padding: 24px;
+      border-radius: 12px;
+      border: 4px double #D97706;
+      margin-top: 20px;
+      display: none;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    .cert-header {
+      text-align: center;
+      border-bottom: 2px solid #D97706;
+      padding-bottom: 12px;
+      margin-bottom: 16px;
+    }
+    .cert-title {
+      font-size: 20px;
+      font-weight: 900;
+      color: #B45309;
+    }
+    .cert-body {
+      font-size: 13px;
+      line-height: 1.8;
+    }
+    .cert-row {
+      display: flex;
+      justify-content: space-between;
+      border-bottom: 1px dashed #CBD5E1;
+      padding: 6px 0;
+    }
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #10B981;
+      color: #FFF;
+      padding: 10px 20px;
+      border-radius: 9999px;
+      font-weight: bold;
+      font-size: 13px;
+      box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+      display: none;
+      z-index: 999;
+    }
+    @media print {
+      body * { visibility: hidden; }
+      .certificate, .certificate * { visibility: visible; }
+      .certificate {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        margin: 0;
+        border: 2px solid #000;
+      }
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <span class="badge">🔒 Master Developer Tool (For Software Owner Only)</span>
+    <h1>أداة المبرمج لتوليد تراخيص MARO POS</h1>
+    <p class="subtitle">توليد أكواد التفعيل المشفرة، إدارة الاشتراكات، وإصدار شهادات البيع والضمان المعتمدة للعملاء</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      <span>🔑</span>
+      <span>توليد كود تفعيل جديد لجهاز عميل</span>
+    </div>
+
+    <div class="form-group">
+      <label for="machineId">معرف جهاز العميل (Machine ID):</label>
+      <input type="text" id="machineId" placeholder="مثال: ID-K8J29X یا ID-4A9B8C1D" autocomplete="off" />
+      <small style="color: var(--text-dim); font-size: 11px; margin-top: 4px; display: block;">
+        * يظهر هذا الكود على شاشة العميل في لوحة "حالة الترخيص"
+      </small>
+    </div>
+
+    <div class="grid">
+      <div class="form-group">
+        <label for="clientName">اسم العميل / الشركة:</label>
+        <input type="text" id="clientName" placeholder="مثال: صيدلية النور / سوبرماركت البركة" />
+      </div>
+
+      <div class="form-group">
+        <label for="licenseType">نوع الترخيص:</label>
+        <select id="licenseType">
+          <option value="lifetime_pro">👑 ترخيص مدى الحياة (Lifetime Pro - مشفر بالكامل)</option>
+          <option value="simple_lifetime">⚡ كود تفعيل مباشر (KEY-ID)</option>
+          <option value="timed_30">⏱️ اشتراك شهري (30 يوماً)</option>
+          <option value="timed_90">⏱️ اشتراك ربع سنوي (90 يوماً)</option>
+          <option value="timed_365">⏱️ اشتراك سنوي (365 يوماً)</option>
+        </select>
+      </div>
+    </div>
+
+    <button class="btn" onclick="generateKey()">
+      <span>⚡</span> توليد كود التفعيل والشهادة
+    </button>
+
+    <div class="result-box" id="resultBox">
+      <label style="color: var(--gold); font-size: 12px; font-weight: bold;">كود التفعيل المشفر الخاص بهذا الجهاز:</label>
+      <div class="key-display" id="keyDisplay"></div>
+      
+      <div style="display: flex; gap: 8px; margin-top: 10px;">
+        <button class="btn btn-secondary" onclick="copyKey()">
+          <span>📋</span> نسخ الكود لإرساله للعميل عبر واتساب
+        </button>
+        <button class="btn btn-secondary" onclick="printCert()">
+          <span>🖨️</span> طباعة شهادة الضمان والترخيص
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Universal Master Keys & Quick Tools -->
+  <div class="card">
+    <div class="card-title">
+      <span>🛡️</span>
+      <span>أكواد الماستر للطوارئ والدعم الفني (Developer Master Keys)</span>
+    </div>
+    <p style="font-size: 12px; color: var(--text-dim); margin-bottom: 12px;">
+      الأكواد التالية تفتح البرنامج على أي جهاز فوراً دون الحاجة لمعرف الجهاز (خاصة بالمبرمج فقط):
+    </p>
+
+    <div class="grid">
+      <div style="background: var(--card-2); padding: 12px; border-radius: 8px; border: 1px solid var(--border);">
+        <span style="font-size: 11px; color: var(--gold); font-weight: bold;">الكود الشامل المفتوح (Universal Key):</span>
+        <div style="font-family: monospace; font-weight: bold; color: #FFF; margin-top: 4px; font-size: 15px;">MARO-FULL-2026</div>
+      </div>
+      <div style="background: var(--card-2); padding: 12px; border-radius: 8px; border: 1px solid var(--border);">
+        <span style="font-size: 11px; color: var(--accent); font-weight: bold;">كود المبرمج المباشر (Dev Key):</span>
+        <div style="font-family: monospace; font-weight: bold; color: #FFF; margin-top: 4px; font-size: 15px;">DEV-MASTER-2026</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Printable Certificate for Customer -->
+  <div class="certificate" id="certificate">
+    <div class="cert-header">
+      <div style="font-size: 14px; font-weight: bold; color: #64748B;">MARO SYSTEMS SOFTWARE SOLUTIONS</div>
+      <div class="cert-title">شهادة ترخيص وتفعيل نظام MARO POS المحاسبي</div>
+      <div style="font-size: 12px; color: #475569;">Official Software License & Authenticity Certificate</div>
+    </div>
+
+    <div class="cert-body">
+      <div class="cert-row">
+        <strong>اسم العميل / النشاط التجاري:</strong>
+        <span id="certClientName">-</span>
+      </div>
+      <div class="cert-row">
+        <strong>معرف الجهاز المرخص (Hardware Machine ID):</strong>
+        <span id="certMachineId" style="font-family: monospace; font-weight: bold;">-</span>
+      </div>
+      <div class="cert-row">
+        <strong>نوع الترخيص:</strong>
+        <span id="certType">ترخيص تجاري كامل مدى الحياة</span>
+      </div>
+      <div class="cert-row">
+        <strong>تاريخ الإصدار:</strong>
+        <span id="certDate">-</span>
+      </div>
+      <div class="cert-row">
+        <strong>كود التفعيل المعتمد (Activation Key):</strong>
+        <span id="certKey" style="font-family: monospace; font-weight: bold; color: #B45309;">-</span>
+      </div>
+    </div>
+
+    <div style="margin-top: 20px; padding-top: 10px; border-top: 1px solid #E2E8F0; font-size: 11px; color: #64748B; text-align: center;">
+      * هذا الترخيص مرخص قانونياً لجهاز واحد محدد بالمعرف أعلاه وغير قابل للنقل إلا بموافقة المبرمج.<br>
+      الدعم الفني والصيانة: <strong>MARO SYSTEMS</strong>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast">تم النسخ بنجاح!</div>
+
+<script>
+  const SECRET_SALT = 'MARO-SECRET-POS-SYS-2026-X99';
+
+  function calculateLicenseHash(input) {
+    let hash = 0;
+    const combined = input + '#' + SECRET_SALT;
+    for (let i = 0; i < combined.length; i++) {
+      const char = combined.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash |= 0;
+    }
+    return Math.abs(hash).toString(36).toUpperCase().padStart(6, '0').slice(0, 6);
+  }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.innerText = msg;
+    t.style.display = 'block';
+    setTimeout(() => { t.style.display = 'none'; }, 3000);
+  }
+
+  function generateKey() {
+    const rawId = document.getElementById('machineId').value.trim().toUpperCase();
+    const clientName = document.getElementById('clientName').value.trim() || 'عميل معتمد';
+    const type = document.getElementById('licenseType').value;
+
+    if (!rawId) {
+      alert('يرجى إدخال معرف الجهاز (Machine ID) أولاً!');
+      return;
+    }
+
+    let finalKey = '';
+    let typeName = '';
+
+    if (type === 'lifetime_pro') {
+      const hash = calculateLicenseHash(rawId);
+      finalKey = 'PRO-' + hash + '-' + rawId;
+      typeName = 'ترخيص دائم مدى الحياة مشفر (Lifetime PRO)';
+    } else if (type === 'simple_lifetime') {
+      finalKey = 'KEY-' + rawId;
+      typeName = 'تفعيل مباشر دائم (Direct Key)';
+    } else if (type.startsWith('timed_')) {
+      const days = parseInt(type.split('_')[1], 10);
+      const expiry = new Date();
+      expiry.setDate(expiry.getDate() + days);
+      
+      const yyyy = expiry.getFullYear().toString();
+      const mm = (expiry.getMonth() + 1).toString().padStart(2, '0');
+      const dd = expiry.getDate().toString().padStart(2, '0');
+      const dateStr = yyyy + mm + dd;
+      
+      const hash = calculateLicenseHash(dateStr + '#' + rawId);
+      finalKey = 'EXP-' + dateStr + '-' + hash + '-' + rawId;
+      typeName = 'اشتراك محدد المدة (' + days + ' يوماً) حتى: ' + expiry.toLocaleDateString('ar-EG');
+    }
+
+    document.getElementById('keyDisplay').innerText = finalKey;
+    document.getElementById('resultBox').style.display = 'block';
+
+    // Populate Certificate
+    document.getElementById('certClientName').innerText = clientName;
+    document.getElementById('certMachineId').innerText = rawId;
+    document.getElementById('certType').innerText = typeName;
+    document.getElementById('certDate').innerText = new Date().toLocaleDateString('ar-EG') + ' - ' + new Date().toLocaleTimeString('ar-EG');
+    document.getElementById('certKey').innerText = finalKey;
+    document.getElementById('certificate').style.display = 'block';
+  }
+
+  function copyKey() {
+    const key = document.getElementById('keyDisplay').innerText;
+    navigator.clipboard.writeText(key).then(() => {
+      showToast('✅ تم نسخ كود التفعيل بنجاح!');
+    });
+  }
+
+  function printCert() {
+    window.print();
+  }
+</script>
+
+</body>
+</html>

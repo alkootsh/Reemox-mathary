@@ -15,6 +15,23 @@ export enum BusinessType {
   AUTO_SPARE_PARTS = 'قطع غيار سيارات وموتسيكلات وتوكتوك',
 }
 
+export interface ProductUnit {
+  name: string; // e.g. "علبة", "شريط", "قرص", "كرتونة", "قطعة", "دستة"
+  conversionFactor: number; // e.g. 1 for base unit (علبة), 0.3333 for strip if 3 strips in a box (or quantity of base units per 1 unit)
+  price: number; // Sale price for this unit
+  cost?: number; // Cost for this unit
+  barcode?: string; // Dedicated barcode for this unit
+  isBase?: boolean; // Primary inventory unit
+}
+
+export interface ProductBatch {
+  id?: string;
+  batchNumber: string; // رقم التشغيلة
+  expirationDate: string; // تاريخ الصلاحية YYYY-MM-DD
+  quantity: number; // الرصيد المتوفر من هذه التشغيلة
+  cost?: number;
+}
+
 export interface Product {
   id: string;
   name: string;
@@ -27,6 +44,9 @@ export interface Product {
   colors?: string[];
   sizes?: string[];
   units?: string[];
+  multiUnits?: ProductUnit[]; // Multi-unit selling (Pack, Strip, Tablet, etc.)
+  batches?: ProductBatch[]; // Batch / Lot tracking
+  batchNumber?: string; // Main batch number
   category?: string;
   lowStockThreshold?: number;
   image?: string;
@@ -37,6 +57,12 @@ export interface Product {
   archived?: boolean;
   branchId?: string;
   brand?: string;
+  openingStock?: number; // رصيد أول المدة
+  openingCost?: number; // تكلفة رصيد أول المدة
+  isPharmacy?: boolean; // صنف صيدلاني
+  stripsPerBox?: number; // عدد الأشرطة بالعلبة
+  stripPrice?: number; // سعر بيع الشريط
+  stripBarcode?: string; // باركود الشريط
 }
 
 export interface Branch {
@@ -112,9 +138,45 @@ export interface SaleItem {
   originalPrice?: number;
   isCustomPrice?: boolean;
   unit?: string;
+  conversionFactor?: number; // Factor to multiply/divide base quantity
+  batchNumber?: string;
+  expirationDate?: string;
   color?: string;
   size?: string;
   unitCost?: number;
+}
+
+export interface InventoryCountItem {
+  productId: string;
+  productName: string;
+  sku: string;
+  category?: string;
+  bookQuantity: number; // الرصيد الدفتري المسجل بالنظام
+  physicalQuantity: number; // الرصيد الفعلي بعد الجرد
+  difference: number; // الفارق = الفعلي - الدفتري (موجب = زيادة، سالب = عجز)
+  unitCost: number; // تكلفة الوحدة
+  differenceValue: number; // قيمة العجز أو الزيادة بالجنيه
+  expirationDate?: string;
+  batchNumber?: string;
+  status: 'MATCH' | 'DEFICIT' | 'SURPLUS';
+  notes?: string;
+}
+
+export interface InventoryCountSession {
+  id: string;
+  title: string;
+  date: string;
+  branchId?: string;
+  status: 'DRAFT' | 'SETTLED' | 'CANCELLED';
+  items: InventoryCountItem[];
+  totalBookQuantity: number;
+  totalPhysicalQuantity: number;
+  totalDeficitValue: number;
+  totalSurplusValue: number;
+  netDifferenceValue: number;
+  settledAt?: string;
+  settledBy?: string;
+  notes?: string;
 }
 
 export interface Payment {

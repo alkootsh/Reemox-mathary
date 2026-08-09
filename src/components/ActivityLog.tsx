@@ -8,7 +8,11 @@ export default function ActivityLog({ sales, customers }: { sales: Sale[], custo
 
     const filteredSales = sales.filter(s => {
         const customer = customers.find(c => c.id === s.customerId || c.name === s.customerName);
-        const matchesSearch = s.id.includes(searchTerm) || (customer?.name.includes(searchTerm) || (s.customerName && s.customerName.includes(searchTerm)));
+        const invNum = s.invoiceNumber || s.id;
+        const matchesSearch = invNum.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                              s.id.toLowerCase().includes(searchTerm.toLowerCase()) || 
+                              (customer?.name && customer.name.includes(searchTerm)) || 
+                              (s.customerName && s.customerName.includes(searchTerm));
         const matchesDate = dateFilter ? new Date(s.date).toDateString() === new Date(dateFilter).toDateString() : true;
         return matchesSearch && matchesDate;
     });
@@ -29,7 +33,7 @@ export default function ActivityLog({ sales, customers }: { sales: Sale[], custo
                                 <div className='flex items-center gap-3'>
                                     <div className='bg-accent p-2 rounded-xl text-white'><ShoppingCart size={16} /></div>
                                     <div>
-                                        <p className='font-bold'>فاتورة #{sale.id}</p>
+                                        <p className='font-bold'>فاتورة #{sale.invoiceNumber || sale.id}</p>
                                         <p className='text-xs text-text-dim'>{new Date(sale.date).toLocaleString('ar-EG')} - {sale.customerName}</p>
                                     </div>
                                 </div>

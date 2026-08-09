@@ -9,7 +9,10 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "electron:start": "electron .",
+    "build:desktop": "vite build && electron-builder",
+    "cap:build": "vite build && npx cap sync"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",

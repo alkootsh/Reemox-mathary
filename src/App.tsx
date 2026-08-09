@@ -298,6 +298,9 @@ export default function App() {
     if (!currentUser) return false;
     if (currentUser.role === 'admin') return true;
 
+    // Strict constraint: Settings, wipe, export and edit functions restricted to Admin only
+    if (screen === 'settings') return false;
+
     if (currentUser.role === 'cashier') {
       return ['pos', 'fast-pos', 'order-management', 'cashier-session'].includes(screen);
     }
@@ -309,6 +312,34 @@ export default function App() {
     }
     return true;
   };
+
+  // Guarded screen navigation with alert notification for restricted screens
+  const handleNavigateScreen = (screen: Screen) => {
+    if (screen === 'settings' && currentUser?.role !== 'admin') {
+      playWarningSound();
+      alert('⚠️ عذراً! الوصول إلى إعدادات النظام ووظائف المسح والتصدير والتعديل مقتصر على حساب المدير (Admin) فقط.');
+      return;
+    }
+    if (!isScreenAllowed(screen)) {
+      playWarningSound();
+      alert('⚠️ ليس لديك صلاحية للوصول إلى هذه الشاشة.');
+      return;
+    }
+    setCurrentScreen(screen);
+  };
+
+  // Redirect guard if non-admin somehow lands on settings screen
+  useEffect(() => {
+    if (currentScreen === 'settings' && currentUser && currentUser.role !== 'admin') {
+      playWarningSound();
+      alert('⚠️ عذراً! الوصول إلى إعدادات النظام ووظائف المسح والتصدير والتعديل مقتصر على حساب المدير (Admin) فقط.');
+      const fallbackScreen: Screen = 
+        currentUser.role === 'cashier' ? 'pos' :
+        currentUser.role === 'accountant' ? 'accounting' :
+        currentUser.role === 'inventory_manager' ? 'inventory' : 'dashboard';
+      setCurrentScreen(fallbackScreen);
+    }
+  }, [currentScreen, currentUser]);
 
   // --- Login Screen ---
   if (!currentUser) {
@@ -444,7 +475,7 @@ export default function App() {
              </span>
            ) : (
              <button
-               onClick={() => setCurrentScreen('settings')}
+               onClick={() => handleNavigateScreen('settings')}
                className={`px-2.5 py-0.5 rounded-full font-bold text-[10px] flex items-center gap-1.5 transition-all shadow-sm ${
                  trial.daysRemaining <= 3
                    ? 'bg-red-500/20 text-red-400 border border-red-500/30 animate-pulse'
@@ -461,7 +492,7 @@ export default function App() {
 
          <div className="flex items-center gap-2">
            <button
-             onClick={() => setCurrentScreen('settings')}
+             onClick={() => handleNavigateScreen('settings')}
              className="bg-card2 hover:bg-card border border-border text-text-dim hover:text-gold px-2.5 py-1 rounded-xl font-bold transition-all text-[11px] flex items-center gap-1"
              title="الإعدادات ولوحة تحكم المبرمج وتوليد الأكواد"
            >

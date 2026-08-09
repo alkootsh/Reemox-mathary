@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Trash2, 
   Camera, 
@@ -29,16 +29,35 @@ import {
   UserPlus,
   MessageCircle,
   Copy,
-  Users
+  Users,
+  Wifi,
+  WifiOff,
+  RefreshCw,
+  Scan,
+  Zap,
+  CheckCircle,
+  Palette,
+  Layout
 } from 'lucide-react';
 import QrScanner from 'react-qr-scanner';
 import { Product, Customer, Sale, Payment, AppUser } from '../types/types';
-import { processSale, getUsers, saveCustomer } from '../lib/firestoreService';
+import { 
+  processSale, 
+  getUsers, 
+  saveCustomer, 
+  getOfflineSales, 
+  saveOfflineSale, 
+  syncOfflineSalesToFirestore, 
+  isOnline 
+} from '../lib/firestoreService';
 import { verifyDeveloperPassword } from '../lib/license';
 import { db } from '@/src/lib/firebase';
 import { collection, getDocs, query, orderBy, limit } from 'firebase/firestore';
-import { playSuccessSound, playWarningSound } from '../lib/sound';
+import { playSuccessSound, playWarningSound, playBarcodeBeepSound } from '../lib/sound';
 import Toast from './Toast';
+import POSDesignSelectorModal, { POSDesignType } from './pos/POSDesignSelectorModal';
+import EmeraldPOSLayout from './pos/EmeraldPOSLayout';
+import TouchPOSLayout from './pos/TouchPOSLayout';
 
 export interface POSCartItem {
   product: Product;
@@ -108,6 +127,17 @@ export default function POS({ customers }: { customers: Customer[] }) {
   const [supervisorOverrideActive, setSupervisorOverrideActive] = useState(false);
   const [pendingPriceEditIndex, setPendingPriceEditIndex] = useState<number | null>(null);
 
+  // Barcode Scanner & Auto-Focus References
+  const barcodeInputRef = useRef<HTMLInputElement>(null);
+  const barcodeBufferRef = useRef<string>('');
+  const lastKeyTimeRef = useRef<number>(0);
+
+  // Offline Sales & Network Synchronization States
+  const [isOnlineState, setIsOnlineState] = useState<boolean>(() => isOnline());
+  const [pendingOfflineCount, setPendingOfflineCount] = useState<number>(() => getOfflineSales().length);
+  const [isSyncingOffline, setIsSyncingOffline] = useState<boolean>(false);
+  const [syncStatusMessage, setSyncStatusMessage] = useState<string | null>(null);
+
   // Payment Modal State
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
   const [cashAmount, setCashAmount] = useState<number>(0);
@@ -138,6 +168,25 @@ export default function POS({ customers }: { customers: Customer[] }) {
   const [storeTaxNumber, setStoreTaxNumber] = useState<string>(() => {
     return localStorage.getItem('businessTax') || '';
   });
+
+  // POS Multiple Design Themes ('emerald' | 'classic' | 'touch' | 'dark')
+  const [posDesign, setPosDesign] = useState<POSDesignType>(() => {
+    const saved = localStorage.getItem('posDesign');
+    return (saved as POSDesignType) || 'emerald';
+  });
+  const [isDesignSelectorOpen, setIsDesignSelectorOpen] = useState(false);
+
+  const handleSelectDesign = (design: POSDesignType) => {
+    setPosDesign(design);
+    localStorage.setItem('posDesign', design);
+    setToastType('success');
+    setToastMessage(`🎨 تم تفعيل مظهر شاشة البيع: ${
+      design === 'emerald' ? 'التصميم الزمردي الحديث' :
+      design === 'touch' ? 'تصميم التاتش السريع' :
+      design === 'dark' ? 'التصميم الليلي الفاخر' :
+      'التصميم المكتبي الكلاسيكي'
+    }`);
+  };
 
   const [products, setProducts] = useState<Product[]>([]);
   
@@ -178,6 +227,13 @@ export default function POS({ customers }: { customers: Customer[] }) {
       setAllowCashierPriceEdit(localStorage.getItem('allowCashierPriceEdit') !== 'false');
       setPreventSellBelowCost(localStorage.getItem('preventSellBelowCost') === 'true');
       setRequireSupervisorPinForPriceEdit(localStorage.getItem('requireSupervisorPinForPriceEdit') !== 'false');
+      const savedDesign = localStorage.getItem('posDesign');
+      if (savedDesign) setPosDesign(savedDesign as POSDesignType);
+    };
+
+    const handlePosCustomizationSync = () => {
+      const savedDesign = localStorage.getItem('posDesign');
+      if (savedDesign) setPosDesign(savedDesign as POSDesignType);
     };
 
     const handleUserSync = () => {
@@ -189,14 +245,221 @@ export default function POS({ customers }: { customers: Customer[] }) {
 
     window.addEventListener('taxSettingsUpdated', handleTaxSync);
     window.addEventListener('posSettingsUpdated', handlePosSettingsSync);
+    window.addEventListener('posCustomizationUpdated', handlePosCustomizationSync);
     window.addEventListener('currentUserUpdated', handleUserSync);
 
+    // Network & Offline Sales Listeners
+    const handleOnlineStatus = () => {
+      setIsOnlineState(true);
+      setToastType('success');
+      setToastMessage('✅ تم استعادة الاتصال بالإنترنت! جاري مزامنة فواتير الأوفلاين...');
+      handleAutoSyncOffline();
+    };
+
+    const handleOfflineStatus = () => {
+      setIsOnlineState(false);
+      setToastType('warning');
+      setToastMessage('⚠️ انقطع الاتصال بالإنترنت! تم تفعيل وضع الأوفلاين (Local Storage Sync) للبيع بدون توقف.');
+    };
+
+    const handleOfflineSalesUpdated = () => {
+      setPendingOfflineCount(getOfflineSales().length);
+    };
+
+    window.addEventListener('online', handleOnlineStatus);
+    window.addEventListener('offline', handleOfflineStatus);
+    window.addEventListener('offlineSalesUpdated', handleOfflineSalesUpdated);
+
+    // Auto-focus on barcode scanner input initially
+    const focusTimer = setTimeout(() => {
+      barcodeInputRef.current?.focus();
+    }, 150);
+
+    // Global Keydown listener for External Hardware Barcode Scanners & Shortcuts
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // F2 Shortcut to immediately focus Barcode input
+      if (e.key === 'F2') {
+        e.preventDefault();
+        barcodeInputRef.current?.focus();
+        barcodeInputRef.current?.select();
+        return;
+      }
+
+      // If user is currently typing in an input/textarea/select, let normal typing happen
+      const activeEl = document.activeElement;
+      const isInputActive = activeEl && (
+        activeEl.tagName === 'INPUT' || 
+        activeEl.tagName === 'TEXTAREA' || 
+        activeEl.tagName === 'SELECT'
+      );
+
+      // Hardware Barcode Scanner burst detection (< 45ms between keystrokes)
+      const now = Date.now();
+      const timeDiff = now - lastKeyTimeRef.current;
+      lastKeyTimeRef.current = now;
+
+      if (e.key === 'Enter') {
+        if (barcodeBufferRef.current.length >= 2) {
+          e.preventDefault();
+          const scannedCode = barcodeBufferRef.current.trim();
+          barcodeBufferRef.current = '';
+          handleProcessBarcodeScan(scannedCode);
+        }
+      } else if (e.key.length === 1) {
+        if (timeDiff < 50 || barcodeBufferRef.current.length > 0) {
+          barcodeBufferRef.current += e.key;
+          // Clear buffer if stalled
+          setTimeout(() => {
+            if (Date.now() - lastKeyTimeRef.current > 150) {
+              barcodeBufferRef.current = '';
+            }
+          }, 200);
+        } else if (!isInputActive) {
+          // If typed outside and first char, redirect focus to barcode input
+          barcodeBufferRef.current = e.key;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+
     return () => {
+      clearTimeout(focusTimer);
       window.removeEventListener('taxSettingsUpdated', handleTaxSync);
       window.removeEventListener('posSettingsUpdated', handlePosSettingsSync);
       window.removeEventListener('currentUserUpdated', handleUserSync);
+      window.removeEventListener('online', handleOnlineStatus);
+      window.removeEventListener('offline', handleOfflineStatus);
+      window.removeEventListener('offlineSalesUpdated', handleOfflineSalesUpdated);
+      window.removeEventListener('keydown', handleGlobalKeyDown);
     };
   }, []);
+
+  // Automatic Background Offline Sync when online
+  const handleAutoSyncOffline = async () => {
+    const pending = getOfflineSales();
+    if (pending.length === 0) return;
+
+    try {
+      setIsSyncingOffline(true);
+      const res = await syncOfflineSalesToFirestore();
+      if (res.syncedCount > 0) {
+        playSuccessSound();
+        setToastType('success');
+        setToastMessage(`🎉 تمت مزامنة ${res.syncedCount} فاتورة أوفلاين بنجاح مع السيرفر!`);
+        fetchProducts();
+        fetchRecentSales();
+      }
+    } catch (e) {
+      console.error('Auto sync error:', e);
+    } finally {
+      setIsSyncingOffline(false);
+      setPendingOfflineCount(getOfflineSales().length);
+    }
+  };
+
+  // Manual Offline Sync Trigger
+  const handleManualOfflineSync = async () => {
+    if (!navigator.onLine) {
+      alert('لا يمكن المزامنة الآن لعدم توفر اتصال بالإنترنت. يرجى التحقق من الشبكة وإعادة المحاولة.');
+      return;
+    }
+
+    const pending = getOfflineSales();
+    if (pending.length === 0) {
+      setToastType('success');
+      setToastMessage('جميع الفواتير متزامنة بالكامل مع السيرفر ✅');
+      return;
+    }
+
+    try {
+      setIsSyncingOffline(true);
+      setSyncStatusMessage('جاري مزامنة الفواتير المعلقة مع السيرفر...');
+      const res = await syncOfflineSalesToFirestore();
+      
+      if (res.syncedCount > 0) {
+        playSuccessSound();
+        setToastType('success');
+        setToastMessage(`✅ تمت مزامنة ${res.syncedCount} فاتورة بنجاح!`);
+        fetchProducts();
+        fetchRecentSales();
+      }
+
+      if (res.failedCount > 0) {
+        playWarningSound();
+        alert(`تمت مزامنة ${res.syncedCount} فاتورة، وتوجد ${res.failedCount} فاتورة بها مشاكل:\n` + res.errors.join('\n'));
+      }
+    } catch (err: any) {
+      playWarningSound();
+      alert('خطأ أثناء المزامنة: ' + err.message);
+    } finally {
+      setIsSyncingOffline(false);
+      setSyncStatusMessage(null);
+      setPendingOfflineCount(getOfflineSales().length);
+    }
+  };
+
+  // Process Barcode Scan (From hardware scanner, camera, or search Enter)
+  const handleProcessBarcodeScan = (scannedCode: string) => {
+    if (!scannedCode || !scannedCode.trim()) return;
+    const cleanCode = scannedCode.trim();
+
+    // Check if barcode matches stripBarcode specifically
+    const stripMatch = products.find(p => 
+      p.stripBarcode && p.stripBarcode.toLowerCase() === cleanCode.toLowerCase()
+    );
+
+    if (stripMatch) {
+      if (stripMatch.quantity <= 0) {
+        playWarningSound();
+        setToastType('warning');
+        setToastMessage(`⚠️ تنبيه: المنتج (${stripMatch.name}) نفد من المخزون.`);
+      }
+      addToCart(stripMatch, undefined, undefined, 'شريط');
+      playBarcodeBeepSound();
+      setToastType('success');
+      const unitPrice = stripMatch.stripPrice || Math.round((stripMatch.price / (stripMatch.stripsPerBox || 1)) * 100) / 100;
+      setToastMessage(`💊 تم مسح باركود الشريط: ${stripMatch.name} [شريط] (${unitPrice} ج.م)`);
+      setSearchTerm('');
+      setTimeout(() => {
+        barcodeInputRef.current?.focus();
+        barcodeInputRef.current?.select();
+      }, 50);
+      return;
+    }
+
+    // Look for exact match by SKU, barcodes array, serial, or ID
+    const matched = products.find(p => 
+      (p.sku && p.sku.toLowerCase() === cleanCode.toLowerCase()) ||
+      (p.barcodes && p.barcodes.some(b => b.toLowerCase() === cleanCode.toLowerCase())) ||
+      (p.serial && p.serial.toLowerCase() === cleanCode.toLowerCase()) ||
+      p.id === cleanCode
+    );
+
+    if (matched) {
+      if (matched.quantity <= 0) {
+        playWarningSound();
+        setToastType('warning');
+        setToastMessage(`⚠️ تنبيه: المنتج (${matched.name}) نفد من المخزون (الرصيد 0).`);
+      }
+
+      addToCart(matched);
+      playBarcodeBeepSound();
+      setToastType('success');
+      setToastMessage(`⚡ تم مسح الباركود بنجاح: ${matched.name} (${matched.price} ج.م)`);
+      setSearchTerm('');
+      
+      // Keep focus on input for next rapid scan
+      setTimeout(() => {
+        barcodeInputRef.current?.focus();
+        barcodeInputRef.current?.select();
+      }, 50);
+    } else {
+      playWarningSound();
+      setToastType('warning');
+      setToastMessage(`❌ لم يتم العثور على منتج يطابق الباركود: [${cleanCode}]`);
+    }
+  };
 
   // Determine whether current user has permission to edit price
   const canUserEditPrice = (): boolean => {
@@ -239,10 +502,11 @@ export default function POS({ customers }: { customers: Customer[] }) {
     }
 
     const item = cart[index];
-    if (preventSellBelowCost && item.product.cost && num < item.product.cost && currentUser?.role !== 'admin' && !supervisorOverrideActive) {
+    const itemCost = item?.product?.cost ?? 0;
+    if (preventSellBelowCost && itemCost > 0 && num < itemCost && currentUser?.role !== 'admin' && !supervisorOverrideActive) {
       playWarningSound();
       setToastType('warning');
-      setToastMessage(`⚠️ تنبيه: لا يمكن البيع بأقل من سعر التكلفة (${item.product.cost} ج.م) وفقاً لسياسة الإدارة`);
+      setToastMessage(`⚠️ تنبيه: لا يمكن البيع بأقل من سعر التكلفة (${itemCost} ج.م) وفقاً لسياسة الإدارة`);
       return;
     }
 
@@ -260,7 +524,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
     setEditingPriceIndex(null);
     playSuccessSound();
     setToastType('success');
-    setToastMessage(`تم تعديل سعر (${item.product.name}) إلى ${num} ج.م بنجاح ✅`);
+    setToastMessage(`تم تعديل سعر (${item?.product?.name || 'الصنف'}) إلى ${num} ج.م بنجاح ✅`);
   };
 
   const handleResetItemPrice = (index: number) => {
@@ -336,7 +600,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
     )
   );
 
-  const addToCart = (product: Product, color?: string, size?: string, unit?: string) => {
+  const addToCart = (product: Product, color?: string, size?: string, unit: string = 'علبة', customPrice?: number) => {
     if (product.quantity <= (product.lowStockThreshold ?? 5)) {
       setToastType('warning');
       setToastMessage(`تحذير: المنتج قارب على النفاذ (${product.quantity} متبقي بالمخزن)`);
@@ -350,24 +614,55 @@ export default function POS({ customers }: { customers: Customer[] }) {
       if (isNaN(quantityToUse) || quantityToUse <= 0) return;
     }
 
+    // Determine final unit price
+    let finalUnitPrice = customPrice ?? product.price;
+    if (unit === 'شريط') {
+      finalUnitPrice = customPrice ?? (product.stripPrice || Math.round((product.price / (product.stripsPerBox || 1)) * 100) / 100);
+    } else if (unit !== 'علبة' && product.multiUnits && product.multiUnits.length > 0) {
+      const mu = product.multiUnits.find(u => u.name === unit);
+      if (mu && mu.price) finalUnitPrice = customPrice ?? mu.price;
+    }
+
     setCart(prev => {
       const existing = prev.find(item => item.product.id === product.id && item.color === color && item.size === size && item.unit === unit);
       if (existing) {
         return prev.map(item =>
-          item.product.id === product.id && item.color === color && item.size === size && item.unit === unit ? { ...item, quantity: item.quantity + quantityToUse } : item
+          item.product.id === product.id && item.color === color && item.size === size && item.unit === unit 
+            ? { ...item, quantity: Math.round((item.quantity + quantityToUse) * 100) / 100 } 
+            : item
         );
       }
       return [...prev, { 
         product, 
         quantity: quantityToUse, 
-        price: product.price, 
-        originalPrice: product.price, 
-        isCustomPrice: false, 
+        price: finalUnitPrice, 
+        originalPrice: finalUnitPrice, 
+        isCustomPrice: customPrice !== undefined, 
         color, 
         size, 
         unit 
       }];
     });
+  };
+
+  const changeCartItemUnit = (index: number, newUnit: string) => {
+    setCart(prev => prev.map((item, i) => {
+      if (i !== index) return item;
+      let newPrice = item.product?.price || item.price;
+      if (newUnit === 'شريط') {
+        newPrice = item.product?.stripPrice || Math.round(((item.product?.price || item.price) / (item.product?.stripsPerBox || 1)) * 100) / 100;
+      } else if (newUnit !== 'علبة' && item.product?.multiUnits && item.product.multiUnits.length > 0) {
+        const mu = item.product.multiUnits.find(u => u.name === newUnit);
+        if (mu && mu.price) newPrice = mu.price;
+      }
+      return {
+        ...item,
+        unit: newUnit,
+        price: newPrice,
+        originalPrice: newPrice,
+        isCustomPrice: false
+      };
+    }));
   };
 
   const removeFromCart = (index: number) => {
@@ -459,7 +754,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
 
     const businessName = localStorage.getItem('businessName') || 'متجر MARO';
     let msg = `*🧾 فاتورة إلكترونية - ${businessName}*\n`;
-    msg += `رقم الفاتورة: #${completedSale.id}\n`;
+    msg += `رقم الفاتورة: #${completedSale.invoiceNumber || completedSale.id}\n`;
     msg += `التاريخ: ${new Date(completedSale.date).toLocaleDateString('ar-EG')}\n`;
     msg += `العميل: ${completedSale.customerName}\n`;
     msg += `--------------------------------\n`;
@@ -492,7 +787,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
   const handleCopyInvoice = () => {
     if (!completedSale) return;
     const businessName = localStorage.getItem('businessName') || 'متجر MARO';
-    let msg = `🧾 فاتورة #${completedSale.id} - ${businessName}\n`;
+    let msg = `🧾 فاتورة #${completedSale.invoiceNumber || completedSale.id} - ${businessName}\n`;
     msg += `التاريخ: ${new Date(completedSale.date).toLocaleString('ar-EG')}\n`;
     msg += `العميل: ${completedSale.customerName}\n`;
     msg += `--------------------------------\n`;
@@ -533,16 +828,17 @@ export default function POS({ customers }: { customers: Customer[] }) {
       customerId: selectedCustomerId,
       customerName: customer ? customer.name : 'عميل نقدي',
       items: cart.map(item => ({
-        productId: item.product.id,
+        productId: item.product?.id || '',
         product: item.product,
-        name: item.product.name,
+        name: item.product?.name || 'صنف',
         quantity: item.quantity,
         price: item.price,
         originalPrice: item.originalPrice,
         isCustomPrice: item.price !== item.originalPrice,
         unit: item.unit,
         color: item.color,
-        size: item.size
+        size: item.size,
+        unitCost: item.product?.cost ?? 0
       })),
       total: subtotal,
       discountType,
@@ -558,13 +854,71 @@ export default function POS({ customers }: { customers: Customer[] }) {
 
     try {
       setProcessing(true);
-      const savedSaleId = await processSale(saleData);
+
+      // Check if Online or Offline
+      if (!isOnline()) {
+        // Save sale to Local Storage Offline Queue
+        const offlineId = saveOfflineSale(saleData, currentUser?.username || 'cashier');
+        playSuccessSound();
+
+        // Optimistically deduct stock in local state so cashier doesn't double-sell
+        setProducts(prev => prev.map(p => {
+          const item = cart.find(ci => ci.product?.id === p.id);
+          if (item) {
+            return { ...p, quantity: Math.max(0, p.quantity - item.quantity) };
+          }
+          return p;
+        }));
+
+        const completedRecord: Sale = {
+          ...saleData,
+          id: offlineId,
+          invoiceNumber: offlineId
+        };
+
+        setCompletedSale(completedRecord);
+        setWhatsAppPhoneInput(customer?.phone || '');
+        setRecentSales(prev => [completedRecord, ...prev]);
+        setPendingOfflineCount(getOfflineSales().length);
+
+        setToastType('warning');
+        setToastMessage(`⚡ تم حفظ الفاتورة بنجاح في التخزين المؤقت المحلي (وضع عدم الاتصال). ستتم المزامنة تلقائياً فور عودة الإنترنت!`);
+
+        // Reset cart & open receipt
+        setCart([]);
+        setSupervisorOverrideActive(false);
+        setEditingPriceIndex(null);
+        setIsPaymentModalOpen(false);
+        setDiscountValue(0);
+        setIsReceiptModalOpen(true);
+        return;
+      }
+
+      // Online checkout via Firestore with Atomic Sequential Invoice Number
+      let savedSaleId = '';
+      let savedInvoiceNumber = '';
+      try {
+        const saleResult = await processSale(saleData, currentUser?.username || 'admin');
+        savedSaleId = saleResult.id;
+        savedInvoiceNumber = saleResult.invoiceNumber;
+      } catch (firestoreErr: any) {
+        // Network timeout / connection drop during transaction -> fallback gracefully to offline queue
+        console.warn('Firestore transaction failed, falling back to Local Storage offline sync:', firestoreErr);
+        const offlineId = saveOfflineSale(saleData, currentUser?.username || 'cashier');
+        savedSaleId = offlineId;
+        savedInvoiceNumber = offlineId;
+        setPendingOfflineCount(getOfflineSales().length);
+        setToastType('warning');
+        setToastMessage('⚠️ تعذر الاتصال بالسيرفر! تم حفظ الفاتورة محلياً بأمان وستتم المزامنة تلقائياً.');
+      }
+
       playSuccessSound();
       
       // Store completed sale for immediate printing
       const completedRecord: Sale = {
         ...saleData,
-        id: savedSaleId || `INV-${Date.now().toString().slice(-6)}`
+        id: savedSaleId || `INV-${Date.now().toString().slice(-6)}`,
+        invoiceNumber: savedInvoiceNumber || `INV-${Date.now().toString().slice(-6)}`
       };
       setCompletedSale(completedRecord);
       setWhatsAppPhoneInput(customer?.phone || '');
@@ -597,8 +951,87 @@ export default function POS({ customers }: { customers: Customer[] }) {
     setIsReceiptModalOpen(true);
   };
 
+  const handleQuickCashCheckoutAndPrint = async () => {
+    if (cart.length === 0) return;
+    const customer = localCustomers.find(c => c.id === selectedCustomerId);
+    const saleData: Sale = {
+      id: '',
+      customerId: selectedCustomerId,
+      customerName: customer ? customer.name : 'عميل نقدي',
+      items: cart.map(item => ({
+        productId: item.product?.id || '',
+        product: item.product,
+        name: item.product?.name || 'صنف',
+        quantity: item.quantity,
+        price: item.price,
+        originalPrice: item.originalPrice,
+        isCustomPrice: item.price !== item.originalPrice,
+        unit: item.unit,
+        color: item.color,
+        size: item.size,
+        unitCost: item.product?.cost ?? 0
+      })),
+      total: subtotal,
+      discountType,
+      discountValue,
+      taxRate: taxEnabled ? taxRate : 0,
+      taxAmount: taxEnabled ? taxAmount : 0,
+      taxType,
+      finalTotal,
+      payments: [{ id: Date.now() + '-quick', saleId: '', method: 'CASH', amount: finalTotal, createdAt: new Date().toISOString() }],
+      status: 'paid',
+      date: new Date().toISOString()
+    };
+
+    try {
+      setProcessing(true);
+      if (!isOnline()) {
+        const offlineId = saveOfflineSale(saleData, currentUser?.username || 'cashier');
+        playSuccessSound();
+        setProducts(prev => prev.map(p => {
+          const item = cart.find(ci => ci.product?.id === p.id);
+          if (item) {
+            return { ...p, quantity: Math.max(0, p.quantity - item.quantity) };
+          }
+          return p;
+        }));
+        const completedRecord: Sale = { ...saleData, id: offlineId, invoiceNumber: offlineId };
+        setCompletedSale(completedRecord);
+        setWhatsAppPhoneInput(customer?.phone || '');
+        setRecentSales(prev => [completedRecord, ...prev]);
+        setPendingOfflineCount(getOfflineSales().length);
+      } else {
+        const result = await processSale(saleData);
+        playSuccessSound();
+        setProducts(prev => prev.map(p => {
+          const item = cart.find(ci => ci.product?.id === p.id);
+          if (item) {
+            return { ...p, quantity: Math.max(0, p.quantity - item.quantity) };
+          }
+          return p;
+        }));
+        const completedRecord: Sale = { ...saleData, id: result.id, invoiceNumber: result.invoiceNumber };
+        setCompletedSale(completedRecord);
+        setWhatsAppPhoneInput(customer?.phone || '');
+        setRecentSales(prev => [completedRecord, ...prev]);
+      }
+
+      setCart([]);
+      setDiscountValue(0);
+      setIsReceiptModalOpen(true);
+      fetchProducts();
+      setToastType('success');
+      setToastMessage('🎉 تم حفظ الفاتورة بنجاح وجاهزة للطباعة الفورية!');
+    } catch (err: any) {
+      playWarningSound();
+      alert(`خطأ أثناء إتمام البيع: ${err.message}`);
+    } finally {
+      setProcessing(false);
+    }
+  };
+
   return (
-    <div className="flex flex-col md:flex-row h-screen p-4 gap-4 pb-20">
+    <div className={`min-h-screen ${posDesign === 'dark' ? 'bg-[#0f172a] text-slate-100' : ''}`}>
       {toastMessage && (
         <Toast 
           message={toastMessage} 
@@ -607,15 +1040,113 @@ export default function POS({ customers }: { customers: Customer[] }) {
         />
       )}
 
-      {/* Product Selection Area */}
+      {posDesign === 'emerald' ? (
+        <EmeraldPOSLayout
+          products={products}
+          customers={localCustomers}
+          cart={cart}
+          searchTerm={searchTerm}
+          setSearchTerm={setSearchTerm}
+          barcodeInputRef={barcodeInputRef}
+          selectedCustomerId={selectedCustomerId}
+          setSelectedCustomerId={setSelectedCustomerId}
+          onAddToCart={addToCart}
+          onRemoveFromCart={removeFromCart}
+          onUpdateQuantity={updateCartQuantity}
+          onChangeUnit={changeCartItemUnit}
+          subtotal={subtotal}
+          discountAmount={discountAmount}
+          discountValue={discountValue}
+          setDiscountValue={setDiscountValue}
+          discountType={discountType}
+          setDiscountType={setDiscountType}
+          taxAmount={taxAmount}
+          finalTotal={finalTotal}
+          taxEnabled={taxEnabled}
+          taxRate={taxRate}
+          onOpenPaymentModal={openPaymentModal}
+          onQuickCheckoutAndPrint={handleQuickCashCheckoutAndPrint}
+          onClearCart={() => setCart([])}
+          onOpenDesignSelector={() => setIsDesignSelectorOpen(true)}
+          onOpenQuickCustomerModal={() => setIsQuickCustomerModalOpen(true)}
+          onOpenRecentSales={() => setShowRecentInvoicesModal(true)}
+          onStartPriceEdit={handleStartPriceEdit}
+          canUserEditPrice={canUserEditPrice()}
+          isOnlineState={isOnlineState}
+          pendingOfflineCount={pendingOfflineCount}
+          onManualOfflineSync={handleManualOfflineSync}
+          currentUser={currentUser}
+          completedSale={completedSale}
+          onOpenReceipt={() => setIsReceiptModalOpen(true)}
+          orderNumber={recentSales.length + 1}
+        />
+      ) : posDesign === 'touch' ? (
+        <TouchPOSLayout
+          products={products}
+          customers={localCustomers}
+          cart={cart}
+          searchTerm={searchTerm}
+          setSearchTerm={setSearchTerm}
+          barcodeInputRef={barcodeInputRef}
+          selectedCustomerId={selectedCustomerId}
+          setSelectedCustomerId={setSelectedCustomerId}
+          onAddToCart={addToCart}
+          onRemoveFromCart={removeFromCart}
+          onUpdateQuantity={updateCartQuantity}
+          subtotal={subtotal}
+          discountAmount={discountAmount}
+          discountValue={discountValue}
+          setDiscountValue={setDiscountValue}
+          finalTotal={finalTotal}
+          onOpenPaymentModal={openPaymentModal}
+          onQuickCheckoutAndPrint={handleQuickCashCheckoutAndPrint}
+          onClearCart={() => setCart([])}
+          onOpenDesignSelector={() => setIsDesignSelectorOpen(true)}
+          onOpenQuickCustomerModal={() => setIsQuickCustomerModalOpen(true)}
+          onOpenRecentSales={() => setShowRecentInvoicesModal(true)}
+          orderNumber={recentSales.length + 1}
+        />
+      ) : (
+        <div className="flex flex-col md:flex-row h-screen p-4 gap-4 pb-20">
+          {/* Product Selection Area */}
       <div className="flex-1 overflow-y-auto space-y-4">
-        {/* Top POS Toolbar */}
+        {/* Top POS Toolbar & Status Header */}
         <div className="flex flex-wrap justify-between items-center bg-card p-4 rounded-2xl border border-border gap-3">
           <div className="flex items-center gap-2">
             <span className="text-2xl">🛒</span>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-lg font-black text-text-main">نقطة البيع وإصدار الفواتير (POS)</h2>
+
+                {/* Online / Offline Indicator Badge */}
+                {isOnlineState ? (
+                  <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[10px] px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <Wifi size={11} />
+                    <span>متصل بالسيرفر (Online)</span>
+                  </span>
+                ) : (
+                  <span className="bg-rose-500/20 text-rose-400 border border-rose-500/40 text-[10px] px-2.5 py-0.5 rounded-full font-black flex items-center gap-1 animate-pulse">
+                    <span className="w-2 h-2 rounded-full bg-rose-500"></span>
+                    <WifiOff size={11} />
+                    <span>وضع أوفلاين (بيع محلي مفعل)</span>
+                  </span>
+                )}
+
+                {/* Auto-focus Barcode Status Indicator */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    barcodeInputRef.current?.focus();
+                    barcodeInputRef.current?.select();
+                  }}
+                  className="bg-gold/10 hover:bg-gold/20 text-gold border border-gold/30 text-[10px] px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1 transition-all"
+                  title="خاصية التركيز التلقائي على قارئ الباركود نشطة (F2 للتركيز الفوري)"
+                >
+                  <Zap size={11} />
+                  <span>القارئ التلقائي جاهز (F2)</span>
+                </button>
+
                 {canUserEditPrice() ? (
                   <span className="bg-green-500/10 text-green-400 border border-green-500/20 text-[10px] px-2 py-0.5 rounded-full font-bold flex items-center gap-1">
                     <Unlock size={11} />
@@ -636,11 +1167,35 @@ export default function POS({ customers }: { customers: Customer[] }) {
                   </button>
                 )}
               </div>
-              <p className="text-xs text-text-dim">إصدار فواتير الكاش والآجل مع الطباعة الحرارية المباشرة</p>
+              <p className="text-xs text-text-dim">إصدار فواتير الكاش والآجل مع الطباعة الحرارية والمزامنة التلقائية</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Offline Sync Trigger Button */}
+            {pendingOfflineCount > 0 && (
+              <button
+                type="button"
+                onClick={handleManualOfflineSync}
+                disabled={isSyncingOffline}
+                className="bg-rose-500/20 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/40 px-3 py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shadow-sm active:scale-95 animate-bounce"
+                title="توجد فواتير تم حفظها أثناء انقطاع الإنترنت، انقر للمزامنة الفورية مع السيرفر"
+              >
+                <RefreshCw size={13} className={isSyncingOffline ? 'animate-spin' : ''} />
+                <span>مزامنة فواتير الأوفلاين ({pendingOfflineCount})</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setIsDesignSelectorOpen(true)}
+              className="bg-emerald-500/20 hover:bg-emerald-500 text-emerald-400 hover:text-white border border-emerald-500/30 px-3 py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shadow-sm"
+              title="تبديل مظهر شاشة البيع (الزمردي الحديث / التاتش / الليلي / الكلاسيكي)"
+            >
+              <Palette size={14} />
+              <span>المظهر ({posDesign === 'emerald' ? 'الزمردي' : posDesign === 'touch' ? 'التاتش' : posDesign === 'dark' ? 'الليلي' : 'كلاسيكي'})</span>
+            </button>
+
             <button 
               onClick={() => setShowRecentInvoicesModal(true)} 
               className="bg-card2 hover:bg-card border border-border text-text-dim hover:text-gold px-3 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm"
@@ -657,7 +1212,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
                 title="إعادة طباعة آخر فاتورة تم حفظها"
               >
                 <Printer size={14} />
-                <span>آخر فاتورة #{completedSale.id.slice(-6)}</span>
+                <span>آخر فاتورة #{(completedSale.invoiceNumber || completedSale.id).slice(-8)}</span>
               </button>
             )}
 
@@ -671,21 +1226,53 @@ export default function POS({ customers }: { customers: Customer[] }) {
           </div>
         </div>
         
-        {/* Search & Barcode Scan Toolbar */}
-        <div className="flex gap-2">
-          <input 
-            type="text" 
-            placeholder="بحث باسم المنتج، الكود SKU، أو الباركود Barcode..." 
-            className="flex-1 bg-card border border-border p-3 rounded-2xl text-sm focus:outline-none focus:border-gold shadow-sm"
-            value={searchTerm}
-            onChange={e => setSearchTerm(e.target.value)}
-          />
+        {/* Search & Barcode Scan Toolbar with Auto-Focus */}
+        <div className="flex gap-2 relative">
+          <div className="relative flex-1">
+            <input 
+              ref={barcodeInputRef}
+              type="text" 
+              placeholder="امسح الباركود بالماسح الخارجي أو ابحث بالاسم / SKU... (Enter للإضافة الفورية ⚡)" 
+              className="w-full bg-card border-2 border-border focus:border-gold p-3.5 pl-24 pr-4 rounded-2xl text-sm focus:outline-none shadow-sm transition-all text-text-main font-medium"
+              value={searchTerm}
+              onChange={e => setSearchTerm(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && searchTerm.trim()) {
+                  e.preventDefault();
+                  handleProcessBarcodeScan(searchTerm);
+                }
+              }}
+            />
+            {searchTerm && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchTerm('');
+                  barcodeInputRef.current?.focus();
+                }}
+                className="absolute left-14 top-1/2 -translate-y-1/2 text-text-dim hover:text-text-main p-1"
+                title="مسح حقل البحث"
+              >
+                <X size={14} />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => handleProcessBarcodeScan(searchTerm)}
+              className="absolute left-2 top-1/2 -translate-y-1/2 bg-gold hover:bg-gold2 text-white px-2.5 py-1 rounded-xl text-[11px] font-bold transition-colors"
+              title="إضافة المنتج المطابق للسلة"
+            >
+              إدخال
+            </button>
+          </div>
+
           <button 
             onClick={() => setIsScanning(!isScanning)} 
-            className="px-4 bg-accent rounded-2xl text-white flex items-center gap-2 hover:bg-gold transition-colors font-bold text-xs shadow-md"
+            className="px-4 bg-accent hover:bg-gold rounded-2xl text-white flex items-center gap-2 transition-colors font-bold text-xs shadow-md"
+            title="فتح كاميرا الموبايل / اللابتوب لمسح الباركود"
           >
             <Camera size={16} />
-            <span className="hidden sm:inline">مسح الباركود</span>
+            <span className="hidden sm:inline">كاميرا</span>
           </button>
         </div>
 
@@ -746,29 +1333,107 @@ export default function POS({ customers }: { customers: Customer[] }) {
 
         {/* Products Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 pb-24">
-          {filteredProducts.map(product => (
-            <div 
-              key={product.id} 
-              onClick={() => addToCart(product)} 
-              className="group bg-card p-3.5 rounded-2xl border border-border flex flex-col justify-between hover:border-gold cursor-pointer transition-all hover:shadow-md active:scale-95"
-            >
-              <div>
-                <div className="flex justify-between items-start">
-                  <h3 className="font-bold text-xs text-text-main line-clamp-2">{product.name}</h3>
-                </div>
-                <p className="text-[10px] text-text-dim mt-1 font-mono">SKU: {product.sku}</p>
-              </div>
+          {filteredProducts.map(product => {
+            const hasStrips = Boolean(product.stripsPerBox && product.stripsPerBox > 1);
+            const stripPrice = product.stripPrice || (hasStrips ? Math.round((product.price / (product.stripsPerBox || 1)) * 100) / 100 : null);
+            
+            // Expiry status check
+            let isExpired = false;
+            let isNearExpiry = false;
+            if (product.expirationDate) {
+              const expTime = new Date(product.expirationDate).getTime();
+              const now = Date.now();
+              const daysLeft = (expTime - now) / (1000 * 60 * 60 * 24);
+              if (daysLeft <= 0) isExpired = true;
+              else if (daysLeft <= 60) isNearExpiry = true;
+            }
 
-              <div className="flex justify-between items-center mt-3 pt-2 border-t border-border">
-                <span className="text-gold font-black text-sm font-mono">{product.price} ج.م</span>
-                <span className={`text-[10px] px-2 py-0.5 rounded-md font-bold ${
-                  product.quantity > 0 ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
-                }`}>
-                  {product.quantity > 0 ? `${product.quantity} متوفر` : 'نفذ'}
-                </span>
+            return (
+              <div 
+                key={product.id} 
+                className="group bg-card p-3.5 rounded-2xl border border-border flex flex-col justify-between hover:border-gold cursor-pointer transition-all hover:shadow-md active:scale-[0.99] space-y-2"
+                onClick={() => addToCart(product)}
+              >
+                <div>
+                  <div className="flex justify-between items-start gap-1">
+                    <h3 className="font-bold text-xs text-text-main line-clamp-2">{product.name}</h3>
+                    {product.isPharmacy && (
+                      <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 text-[9px] px-1.5 py-0.5 rounded font-bold whitespace-nowrap flex items-center gap-0.5">
+                        💊 دواء
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between text-[10px] text-text-dim mt-1 font-mono">
+                    <span>SKU: {product.sku}</span>
+                    {product.batchNumber && (
+                      <span className="text-gold/80 font-sans text-[9px]">تشغيلة: {product.batchNumber}</span>
+                    )}
+                  </div>
+
+                  {product.expirationDate && (
+                    <div className="mt-1">
+                      {isExpired ? (
+                        <span className="bg-rose-500/20 text-rose-300 border border-rose-500/40 text-[9px] px-1.5 py-0.5 rounded font-bold inline-block">
+                          ❌ منتهي الصلاحية ({product.expirationDate})
+                        </span>
+                      ) : isNearExpiry ? (
+                        <span className="bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[9px] px-1.5 py-0.5 rounded font-bold inline-block">
+                          ⚠️ ينتهي قريباً ({product.expirationDate})
+                        </span>
+                      ) : (
+                        <span className="text-text-dim text-[9px] block">
+                          📅 صلاحية: {product.expirationDate}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="pt-2 border-t border-border space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-gold font-black text-sm font-mono">{product.price} ج.م</span>
+                    <span className={`text-[10px] px-2 py-0.5 rounded-md font-bold ${
+                      product.quantity > 0 ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400'
+                    }`}>
+                      {product.quantity > 0 ? `${product.quantity} متوفر` : 'نفذ'}
+                    </span>
+                  </div>
+
+                  {/* Multi-unit quick buttons (Box vs Strip) */}
+                  {hasStrips && (
+                    <div className="grid grid-cols-2 gap-1.5 pt-1" onClick={e => e.stopPropagation()}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          addToCart(product, undefined, undefined, 'علبة');
+                          playBarcodeBeepSound();
+                          setToastType('success');
+                          setToastMessage(`تمت إضافة (علبة) ${product.name}`);
+                        }}
+                        className="bg-card2 hover:bg-gold hover:text-white border border-border text-[10px] font-bold py-1 px-1 rounded-lg text-center transition-all truncate"
+                        title="إضافة علبة كاملة"
+                      >
+                        📦 علبة ({product.price}ج)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          addToCart(product, undefined, undefined, 'شريط');
+                          playBarcodeBeepSound();
+                          setToastType('success');
+                          setToastMessage(`💊 تمت إضافة (شريط) ${product.name}`);
+                        }}
+                        className="bg-accent/20 hover:bg-accent hover:text-white border border-accent/40 text-accent hover:text-white text-[10px] font-bold py-1 px-1 rounded-lg text-center transition-all truncate"
+                        title={`إضافة شريط (${product.stripsPerBox} أشرطة بالعلبة)`}
+                      >
+                        💊 شريط ({stripPrice}ج)
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
       
@@ -791,7 +1456,10 @@ export default function POS({ customers }: { customers: Customer[] }) {
               <p className="text-[11px] text-text-dim">انقر على أي منتج في القائمة لإضافته للفاتورة</p>
             </div>
           ) : (
-            cart.map((item, index) => (
+            cart.map((item, index) => {
+              const hasStrips = Boolean(item.product?.stripsPerBox && item.product.stripsPerBox > 1);
+              const itemCost = item.product?.cost ?? 0;
+              return (
               <div key={index} className={`p-3 rounded-2xl text-xs border transition-all ${
                 item.isCustomPrice 
                   ? 'bg-amber-500/5 border-amber-500/30' 
@@ -799,24 +1467,68 @@ export default function POS({ customers }: { customers: Customer[] }) {
               } space-y-2.5`}>
                 <div className="flex justify-between items-start">
                   <div className="min-w-0 flex-1">
-                    <p className="font-bold text-text-main truncate">{item.product.name}</p>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <p className="font-bold text-text-main truncate">{item.product?.name || 'صنف'}</p>
+                      {item.product?.isPharmacy && (
+                        <span className="text-[9px] bg-emerald-500/10 text-emerald-400 px-1.5 py-0.2 rounded font-bold">
+                          💊 دواء
+                        </span>
+                      )}
+                    </div>
+
                     <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
-                      <span className="text-[10px] text-text-dim font-mono">
-                        {item.price} ج.م × {item.quantity}
+                      <span className="text-[10px] text-text-dim font-mono font-bold">
+                        {item.price} ج.م / {item.unit || 'وحدة'} × {item.quantity}
                       </span>
                       {item.isCustomPrice && (
                         <span className="bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[9px] px-1.5 py-0.2 rounded-md font-bold">
                           سعر مخصص (الأصل: {item.originalPrice} ج)
                         </span>
                       )}
-                      {(item.color || item.size || item.unit) && (
+                      {(item.color || item.size) && (
                         <span className="text-[9px] text-text-dim">
                           {item.color ? `لون: ${item.color} ` : ''}
-                          {item.size ? `مقاس: ${item.size} ` : ''}
-                          {item.unit ? `وحدة: ${item.unit}` : ''}
+                          {item.size ? `مقاس: ${item.size}` : ''}
                         </span>
                       )}
                     </div>
+
+                    {/* Expiry & Batch info if available */}
+                    {(item.product?.expirationDate || item.product?.batchNumber) && (
+                      <div className="flex items-center gap-2 mt-1 text-[9px] text-text-dim">
+                        {item.product?.expirationDate && <span>📅 صلاحية: {item.product.expirationDate}</span>}
+                        {item.product?.batchNumber && <span>🏷️ تشغيلة: {item.product.batchNumber}</span>}
+                      </div>
+                    )}
+
+                    {/* Unit Switcher if product has multiple units / strips */}
+                    {hasStrips && (
+                      <div className="flex items-center gap-1 mt-1.5">
+                        <span className="text-[9px] text-text-dim">الوحدة:</span>
+                        <button
+                          type="button"
+                          onClick={() => changeCartItemUnit(index, 'علبة')}
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all ${
+                            (item.unit || 'علبة') === 'علبة'
+                              ? 'bg-gold text-white shadow-sm'
+                              : 'bg-card border border-border text-text-dim hover:text-text-main'
+                          }`}
+                        >
+                          📦 علبة
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => changeCartItemUnit(index, 'شريط')}
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold transition-all ${
+                            item.unit === 'شريط'
+                              ? 'bg-accent text-white shadow-sm'
+                              : 'bg-card border border-border text-text-dim hover:text-accent'
+                          }`}
+                        >
+                          💊 شريط
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-1">
@@ -899,10 +1611,10 @@ export default function POS({ customers }: { customers: Customer[] }) {
                       </button>
                     </div>
 
-                    {preventSellBelowCost && item.product.cost && Number(tempPriceValue) < item.product.cost && (
+                    {preventSellBelowCost && itemCost > 0 && Number(tempPriceValue) < itemCost && (
                       <div className="text-[10px] text-danger bg-danger/10 p-1.5 rounded-lg border border-danger/20 flex items-center gap-1 font-bold">
                         <ShieldAlert size={12} />
-                        <span>تحذير: السعر المدخل أقل من سعر التكلفة ({item.product.cost} ج.م)!</span>
+                        <span>تحذير: السعر المدخل أقل من سعر التكلفة ({itemCost} ج.م)!</span>
                       </div>
                     )}
                   </div>
@@ -936,7 +1648,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
                   <span className="font-black text-gold font-mono">{item.price * item.quantity} ج.م</span>
                 </div>
               </div>
-            ))
+            );})
           )}
         </div>
         
@@ -994,6 +1706,16 @@ export default function POS({ customers }: { customers: Customer[] }) {
           </button>
         </div>
       </div>
+    </div>
+  )}
+
+      {/* POS Design Switcher Modal */}
+      <POSDesignSelectorModal
+        isOpen={isDesignSelectorOpen}
+        onClose={() => setIsDesignSelectorOpen(false)}
+        currentDesign={posDesign}
+        onSelectDesign={handleSelectDesign}
+      />
 
       {/* Payment Engine Modal with Split Payment Support */}
       {isPaymentModalOpen && (
@@ -1252,9 +1974,16 @@ export default function POS({ customers }: { customers: Customer[] }) {
               </div>
 
               <div className="py-2 space-y-1 text-[11px] border-b border-dashed border-gray-400 text-gray-700">
-                <div className="flex justify-between">
+                <div className="flex justify-between items-center">
                   <span>رقم الفاتورة:</span>
-                  <span className="font-bold">#{completedSale.id}</span>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-bold">#{completedSale.invoiceNumber || completedSale.id}</span>
+                    {completedSale.id.startsWith('OFFLINE-') && (
+                      <span className="bg-amber-100 text-amber-800 text-[9px] font-bold px-1.5 py-0.5 rounded border border-amber-300">
+                        ⚡ أوفلاين (مؤقتة)
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <div className="flex justify-between">
                   <span>التاريخ والوقت:</span>
@@ -1414,7 +2143,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
           <div style={{ borderTop: '1px dashed #444', borderBottom: '1px dashed #444', padding: '4px 0', margin: '6px 0', fontSize: '11px' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span>رقم الفاتورة:</span>
-              <strong>#{completedSale.id}</strong>
+              <strong>#{completedSale.invoiceNumber || completedSale.id}</strong>
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between' }}>
               <span>التاريخ:</span>
@@ -1514,7 +2243,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
                   <div key={sale.id} className="bg-card2 p-3 rounded-2xl border border-border flex justify-between items-center">
                     <div>
                       <div className="flex items-center gap-2">
-                        <strong className="text-text-main font-bold">#{sale.id.slice(-8)}</strong>
+                        <strong className="text-text-main font-bold">#{sale.invoiceNumber || sale.id.slice(-8)}</strong>
                         <span className="text-gold font-black font-mono">{sale.finalTotal} ج.م</span>
                       </div>
                       <p className="text-[10px] text-text-dim mt-0.5">

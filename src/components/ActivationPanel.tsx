@@ -16,6 +16,7 @@ import {
 } from '../lib/license';
 import Toast from './Toast';
 import { playSuccessSound, playWarningSound } from '../lib/sound';
+import DeveloperKeygenSuite from './DeveloperKeygenSuite';
 
 export default function ActivationPanel() {
   const [trial, setTrial] = useState<TrialStatus>(getTrialStatus);
@@ -414,6 +415,24 @@ export default function ActivationPanel() {
                       </button>
                     </div>
                   )}
+                </div>
+
+                {/* Developer Hub & Full Packaging Suite */}
+                <div className="pt-4 border-t border-border">
+                  <div className="flex justify-between items-center mb-3">
+                    <span className="font-bold text-text-main">
+                      📦 مركز حزم الديسكتوب والموبايل والتراخيص المتقدمة:
+                    </span>
+                    <a
+                      href="/keygen.html"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs bg-gold hover:bg-amber-600 text-black px-3 py-1 rounded-lg font-black transition-all"
+                    >
+                      🌐 فتح صفحة المولد المستقلة
+                    </a>
+                  </div>
+                  <DeveloperKeygenSuite />
                 </div>
               </div>
             )}

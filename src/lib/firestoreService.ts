@@ -14,7 +14,7 @@ import {
   Timestamp 
 } from 'firebase/firestore';
 import { db } from './firebase';
-import { Sale, Product, InventoryMovement, CashierSession, Customer, Supplier, Purchase, Expense, Category, AppUser } from '../types/types';
+import { Sale, Product, InventoryMovement, MovementType, CashierSession, Customer, Supplier, Purchase, Expense, Category, AppUser } from '../types/types';
 
 // Collections
 const PRODUCTS_COL = 'products';
@@ -27,6 +27,7 @@ const PURCHASES_COL = 'purchases';
 const EXPENSES_COL = 'expenses';
 const CATEGORIES_COL = 'categories';
 const USERS_COL = 'users';
+const COUNTERS_COL = 'counters';
 
 // --- Products ---
 export async function getProducts(): Promise<Product[]> {
@@ -50,15 +51,52 @@ export async function saveProduct(product: Partial<Product>): Promise<string> {
   }
 }
 
-// --- Sales & Inventory Atomic Transaction ---
-export async function processSale(saleData: Omit<Sale, 'id'>, userId: string = 'admin'): Promise<string> {
+export interface InvoiceSequenceConfig {
+  current: number;
+  prefix: string;
+  padding: number;
+}
+
+// Fetch invoice sequence counter settings
+export async function getInvoiceCounter(): Promise<InvoiceSequenceConfig> {
+  try {
+    const docRef = doc(db, COUNTERS_COL, 'sales');
+    const snap = await getDoc(docRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      return {
+        current: Number(data.current || 1000),
+        prefix: data.prefix ?? 'INV-',
+        padding: Number(data.padding ?? 5)
+      };
+    }
+  } catch (e) {
+    console.error('Error fetching invoice counter:', e);
+  }
+  return { current: 1000, prefix: 'INV-', padding: 5 };
+}
+
+// Update invoice sequence counter or prefix
+export async function updateInvoiceSequenceSettings(config: Partial<InvoiceSequenceConfig>): Promise<void> {
+  const docRef = doc(db, COUNTERS_COL, 'sales');
+  await setDoc(docRef, {
+    ...config,
+    updatedAt: new Date().toISOString()
+  }, { merge: true });
+}
+
+// --- Sales & Inventory Atomic Transaction with Sequential Invoice Numbering ---
+export async function processSale(
+  saleData: Omit<Sale, 'id'>, 
+  userId: string = 'admin'
+): Promise<{ id: string; invoiceNumber: string }> {
   return await runTransaction(db, async (transaction) => {
     // 1. Check stock for all items
     const productReads = await Promise.all(
       saleData.items.map(item => transaction.get(doc(db, PRODUCTS_COL, item.productId)))
     );
 
-    const productUpdates: { ref: any, newQty: number, product: Product, stockBefore: number }[] = [];
+    const productUpdates: { ref: any; newQty: number; product: Product; stockBefore: number; deductedQty: number }[] = [];
 
     for (let i = 0; i < saleData.items.length; i++) {
       const item = saleData.items[i];
@@ -68,32 +106,68 @@ export async function processSale(saleData: Omit<Sale, 'id'>, userId: string = '
       }
       const product = { id: prodDoc.id, ...prodDoc.data() } as Product;
       const stockBefore = product.quantity;
-      const newQty = stockBefore - item.quantity;
 
-      if (newQty < 0) {
-        throw new Error(`الكمية غير متاحة في المخزون للمنتج: ${product.name} (المتاح: ${stockBefore}, المطلوب: ${item.quantity})`);
+      // Calculate quantity deduction considering multi-units (e.g. strips vs box)
+      let qtyToDeduct = item.quantity;
+      if (item.unit === 'شريط' && product.stripsPerBox && product.stripsPerBox > 1) {
+        qtyToDeduct = Math.round((item.quantity / product.stripsPerBox) * 1000) / 1000;
+      } else if (item.unit && product.multiUnits && product.multiUnits.length > 0) {
+        const matchedUnit = product.multiUnits.find(u => u.name === item.unit);
+        if (matchedUnit && matchedUnit.conversionFactor && matchedUnit.conversionFactor > 0) {
+          qtyToDeduct = Math.round((item.quantity / matchedUnit.conversionFactor) * 1000) / 1000;
+        }
+      }
+
+      const newQty = Math.max(0, Math.round((stockBefore - qtyToDeduct) * 1000) / 1000);
+
+      if (stockBefore < qtyToDeduct && stockBefore <= 0) {
+        throw new Error(`الكمية غير متاحة في المخزون للمنتج: ${product.name} (المتاح: ${stockBefore}, المطلوب: ${item.quantity} ${item.unit || 'وحدة'})`);
       }
 
       productUpdates.push({
         ref: doc(db, PRODUCTS_COL, product.id),
         newQty,
         product,
-        stockBefore
+        stockBefore,
+        deductedQty: qtyToDeduct
       });
     }
 
-    // 2. Create Sale document ref
+    // 2. Fetch and increment atomic sequential invoice counter
+    const counterRef = doc(db, COUNTERS_COL, 'sales');
+    const counterDoc = await transaction.get(counterRef);
+    let nextInvoiceSeq = 1001;
+    let prefix = 'INV-';
+    let padding = 5;
+
+    if (counterDoc.exists()) {
+      const data = counterDoc.data();
+      const currentVal = Number(data.current || data.lastNumber || 0);
+      nextInvoiceSeq = currentVal + 1;
+      if (data.prefix !== undefined) prefix = data.prefix;
+      if (data.padding !== undefined) padding = Number(data.padding);
+    } else {
+      nextInvoiceSeq = 1001;
+    }
+
+    // Format consecutive serial number e.g. INV-01001 or custom
+    const formattedInvoiceNumber = saleData.invoiceNumber && !saleData.invoiceNumber.startsWith('OFFLINE-')
+      ? saleData.invoiceNumber
+      : `${prefix}${String(nextInvoiceSeq).padStart(padding, '0')}`;
+
+    // 3. Create Sale document ref
     const saleRef = doc(collection(db, SALES_COL));
     const saleId = saleRef.id;
 
     const saleRecord: Sale = {
       ...saleData,
       id: saleId,
+      invoiceNumber: formattedInvoiceNumber,
       userId,
-      date: new Date().toISOString()
+      date: saleData.date || new Date().toISOString()
     };
 
-    // 3. Create Inventory Movements
+    // 4. Create Inventory Movements
     const movementRefs = productUpdates.map(u => ({
       ref: doc(collection(db, MOVEMENTS_COL)),
       data: {
@@ -101,18 +175,18 @@ export async function processSale(saleData: Omit<Sale, 'id'>, userId: string = '
         productName: u.product.name,
         branchId: saleData.branchId || 'default',
         movementType: 'SALE' as const,
-        quantity: -saleData.items.find(i => i.productId === u.product.id)!.quantity,
+        quantity: -u.deductedQty,
         unitCost: u.product.cost,
         stockBefore: u.stockBefore,
         stockAfter: u.newQty,
         referenceType: 'SALE' as const,
-        referenceId: saleId,
+        referenceId: formattedInvoiceNumber,
         userId,
         createdAt: new Date().toISOString()
       } as Omit<InventoryMovement, 'id'>
     }));
 
-    // 4. Update customer balance if credit / unpaid
+    // 5. Update customer balance if credit / unpaid
     let customerRef = null;
     let customerNewBalance = 0;
     if (saleData.customerId && saleData.customerId !== 'cash-customer') {
@@ -126,7 +200,15 @@ export async function processSale(saleData: Omit<Sale, 'id'>, userId: string = '
       }
     }
 
-    // --- Execute Writes ---
+    // --- Execute Atomic Writes ---
+    // Update counter
+    transaction.set(counterRef, {
+      current: nextInvoiceSeq,
+      prefix,
+      padding,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+
     // Update products
     productUpdates.forEach(u => {
       transaction.update(u.ref, { quantity: u.newQty });
@@ -145,7 +227,7 @@ export async function processSale(saleData: Omit<Sale, 'id'>, userId: string = '
       transaction.update(customerRef, { currentBalance: customerNewBalance });
     }
 
-    return saleId;
+    return { id: saleId, invoiceNumber: formattedInvoiceNumber };
   });
 }
 
@@ -195,6 +277,71 @@ export async function processSaleReturn(saleId: string, returnedItems: { product
 
     transaction.update(saleRef, { isReturned: true, status: 'returned' });
   });
+}
+
+// --- Inventory Adjustments & Settlements ---
+export async function recordInventoryAdjustment(
+  product: Product, 
+  newQuantity: number, 
+  reason: string = 'تسوية جرد دوري',
+  userId: string = 'admin'
+): Promise<void> {
+  const stockBefore = product.quantity;
+  const diff = newQuantity - stockBefore;
+  if (diff === 0) return;
+
+  const movementType: MovementType = diff > 0 ? 'ADJUSTMENT_IN' : 'ADJUSTMENT_OUT';
+  const movementRef = doc(collection(db, MOVEMENTS_COL));
+  const productRef = doc(db, PRODUCTS_COL, product.id);
+
+  await runTransaction(db, async (transaction) => {
+    transaction.update(productRef, { 
+      quantity: newQuantity,
+      updatedAt: new Date().toISOString()
+    });
+
+    transaction.set(movementRef, {
+      productId: product.id,
+      productName: product.name,
+      branchId: product.branchId || 'default',
+      movementType,
+      quantity: Math.abs(diff),
+      unitCost: product.cost || 0,
+      stockBefore,
+      stockAfter: newQuantity,
+      referenceType: 'ADJUSTMENT',
+      referenceId: `ADJ-${Date.now().toString().slice(-6)}`,
+      userId,
+      createdAt: new Date().toISOString(),
+      notes: `${reason} (${diff > 0 ? 'زيادة' : 'عجز'}: ${Math.abs(diff)})`
+    });
+  });
+}
+
+export async function recordBatchInventorySettlement(
+  adjustments: { product: Product; newQuantity: number; notes?: string }[],
+  sessionTitle: string = 'جرد وتسوية المخزن',
+  userId: string = 'admin'
+): Promise<{ settledCount: number; totalDiffValue: number }> {
+  const batchSessionId = `AUDIT-${Date.now().toString().slice(-6)}`;
+  let settledCount = 0;
+  let totalDiffValue = 0;
+
+  for (const item of adjustments) {
+    const diff = item.newQuantity - item.product.quantity;
+    if (diff !== 0) {
+      await recordInventoryAdjustment(
+        item.product,
+        item.newQuantity,
+        `${sessionTitle} [${batchSessionId}] ${item.notes || ''}`,
+        userId
+      );
+      settledCount++;
+      totalDiffValue += diff * (item.product.cost || 0);
+    }
+  }
+
+  return { settledCount, totalDiffValue };
 }
 
 // --- Cashier Sessions ---
@@ -388,5 +535,256 @@ export async function seedInitialData(): Promise<void> {
     console.error('Error seeding initial data:', err);
   }
 }
+
+// =========================================================
+// OFFLINE SALES & LOCAL STORAGE SYNCHRONIZATION ENGINE
+// =========================================================
+const OFFLINE_SALES_KEY = 'pending_offline_sales';
+
+export function isOnline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine;
+}
+
+export function getOfflineSales(): Sale[] {
+  try {
+    const raw = localStorage.getItem(OFFLINE_SALES_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw);
+  } catch (e) {
+    console.error('Error reading offline sales:', e);
+    return [];
+  }
+}
+
+export function saveOfflineSale(saleData: Omit<Sale, 'id'>, userId: string = 'admin'): string {
+  const offlineId = `OFFLINE-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+  const offlineSale: Sale = {
+    ...saleData,
+    id: offlineId,
+    userId,
+    date: new Date().toISOString()
+  };
+
+  try {
+    const existing = getOfflineSales();
+    const updated = [offlineSale, ...existing];
+    localStorage.setItem(OFFLINE_SALES_KEY, JSON.stringify(updated));
+    
+    // Dispatch custom event for UI updates across tabs/components
+    window.dispatchEvent(new CustomEvent('offlineSalesUpdated', { detail: { count: updated.length } }));
+  } catch (e) {
+    console.error('Failed to save offline sale to localStorage:', e);
+  }
+
+  return offlineId;
+}
+
+export function removeOfflineSale(saleId: string): void {
+  try {
+    const existing = getOfflineSales();
+    const filtered = existing.filter(s => s.id !== saleId);
+    localStorage.setItem(OFFLINE_SALES_KEY, JSON.stringify(filtered));
+    window.dispatchEvent(new CustomEvent('offlineSalesUpdated', { detail: { count: filtered.length } }));
+  } catch (e) {
+    console.error('Error removing offline sale:', e);
+  }
+}
+
+export async function syncOfflineSalesToFirestore(): Promise<{
+  syncedCount: number;
+  failedCount: number;
+  errors: string[];
+}> {
+  const pending = getOfflineSales();
+  if (pending.length === 0) {
+    return { syncedCount: 0, failedCount: 0, errors: [] };
+  }
+
+  let syncedCount = 0;
+  let failedCount = 0;
+  const errors: string[] = [];
+
+  for (const offlineSale of pending) {
+    try {
+      // Prepare sale data for Firestore transaction
+      const { id: _, ...saleDataWithoutId } = offlineSale;
+      await processSale(saleDataWithoutId, offlineSale.userId || 'admin');
+      
+      // Remove successfully synced sale from local storage
+      removeOfflineSale(offlineSale.id);
+      syncedCount++;
+    } catch (err: any) {
+      console.error(`Failed to sync offline sale ${offlineSale.id}:`, err);
+      failedCount++;
+      errors.push(`فاتورة #${offlineSale.id}: ${err.message || 'خطأ غير متوقع'}`);
+    }
+  }
+
+  window.dispatchEvent(new CustomEvent('offlineSalesSynced', { 
+    detail: { syncedCount, failedCount, errors } 
+  }));
+
+  return { syncedCount, failedCount, errors };
+}
+
+// =========================================================
+// DATABASE BACKUP & SYSTEM RESET ENGINE
+// =========================================================
+export interface FullSystemBackup {
+  products: Product[];
+  sales: Sale[];
+  customers: Customer[];
+  suppliers: Supplier[];
+  categories: Category[];
+  expenses: Expense[];
+  purchases: Purchase[];
+  offlineSales: Sale[];
+  settings: Record<string, string>;
+  timestamp: string;
+  version: string;
+}
+
+export async function exportFullDatabaseBackup(): Promise<FullSystemBackup> {
+  const safeFetch = async <T>(fetcher: () => Promise<T[]>, fallbackName: string): Promise<T[]> => {
+    try {
+      return await fetcher();
+    } catch (e) {
+      console.warn(`Backup: could not fetch ${fallbackName}, returning empty array`, e);
+      return [];
+    }
+  };
+
+  const [products, sales, customers, suppliers, categories, expenses, purchases] = await Promise.all([
+    safeFetch(getProducts, 'products'),
+    safeFetch(getSales, 'sales'),
+    safeFetch(getCustomers, 'customers'),
+    safeFetch(getSuppliers, 'suppliers'),
+    safeFetch(getCategories, 'categories'),
+    safeFetch(getExpenses, 'expenses'),
+    safeFetch(getPurchases, 'purchases')
+  ]);
+
+  const offlineSales = getOfflineSales();
+
+  // Extract localStorage settings
+  const settingsKeys = [
+    'businessName', 'businessAddress', 'businessPhone', 'businessTax', 'businessLogoUrl',
+    'currency', 'invoiceNotes', 'taxRate', 'taxEnabled', 'taxType', 'paperSize', 'showLogo',
+    'allowCashierPriceEdit', 'preventSellBelowCost', 'requireSupervisorPinForPriceEdit',
+    'managerWhatsApp', 'managerEmail', 'posDesign', 'posTouchMode', 'posPrimaryColor',
+    'posButtonSize', 'posViewMode'
+  ];
+
+  const settings: Record<string, string> = {};
+  settingsKeys.forEach(k => {
+    const val = localStorage.getItem(k);
+    if (val !== null) settings[k] = val;
+  });
+
+  return {
+    products,
+    sales,
+    customers,
+    suppliers,
+    categories,
+    expenses,
+    purchases,
+    offlineSales,
+    settings,
+    timestamp: new Date().toISOString(),
+    version: '2.5.0'
+  };
+}
+
+export type SystemResetMode = 'full' | 'balances_only' | 'sales_purchases_only';
+
+export async function resetSystemDatabase(mode: SystemResetMode): Promise<void> {
+  const deleteCollectionDocs = async (colName: string) => {
+    try {
+      const snap = await getDocs(collection(db, colName));
+      const deletePromises = snap.docs.map(d => deleteDoc(doc(db, colName, d.id)));
+      await Promise.all(deletePromises);
+    } catch (e) {
+      console.warn(`Error clearing collection ${colName}:`, e);
+    }
+  };
+
+  if (mode === 'full') {
+    // Complete wipe: delete all business entities
+    await Promise.all([
+      deleteCollectionDocs(PRODUCTS_COL),
+      deleteCollectionDocs(SALES_COL),
+      deleteCollectionDocs(CUSTOMERS_COL),
+      deleteCollectionDocs(SUPPLIERS_COL),
+      deleteCollectionDocs(EXPENSES_COL),
+      deleteCollectionDocs(PURCHASES_COL),
+      deleteCollectionDocs(CATEGORIES_COL),
+      deleteCollectionDocs(MOVEMENTS_COL),
+      deleteCollectionDocs(SESSIONS_COL)
+    ]);
+
+    // Clear offline sales & local cache
+    localStorage.removeItem(OFFLINE_SALES_KEY);
+    indexedDB.deleteDatabase('firestoreCached');
+  } 
+  else if (mode === 'balances_only') {
+    // Reset stock quantities to 0 for all products
+    try {
+      const prodSnap = await getDocs(collection(db, PRODUCTS_COL));
+      const prodUpdates = prodSnap.docs.map(d => updateDoc(doc(db, PRODUCTS_COL, d.id), { quantity: 0 }));
+      await Promise.all(prodUpdates);
+    } catch (e) {
+      console.warn('Error resetting product quantities:', e);
+    }
+
+    // Reset customer balances
+    try {
+      const custSnap = await getDocs(collection(db, CUSTOMERS_COL));
+      const custUpdates = custSnap.docs.map(d => {
+        const data = d.data();
+        return updateDoc(doc(db, CUSTOMERS_COL, d.id), { currentBalance: data.openingBalance || 0 });
+      });
+      await Promise.all(custUpdates);
+    } catch (e) {
+      console.warn('Error resetting customer balances:', e);
+    }
+
+    // Reset supplier balances
+    try {
+      const suppSnap = await getDocs(collection(db, SUPPLIERS_COL));
+      const suppUpdates = suppSnap.docs.map(d => {
+        const data = d.data();
+        return updateDoc(doc(db, SUPPLIERS_COL, d.id), { currentBalance: data.openingBalance || 0 });
+      });
+      await Promise.all(suppUpdates);
+    } catch (e) {
+      console.warn('Error resetting supplier balances:', e);
+    }
+
+    // Delete transactions & movements history
+    await Promise.all([
+      deleteCollectionDocs(SALES_COL),
+      deleteCollectionDocs(PURCHASES_COL),
+      deleteCollectionDocs(EXPENSES_COL),
+      deleteCollectionDocs(MOVEMENTS_COL),
+      deleteCollectionDocs(SESSIONS_COL)
+    ]);
+
+    localStorage.removeItem(OFFLINE_SALES_KEY);
+  } 
+  else if (mode === 'sales_purchases_only') {
+    // Delete sales, purchases, expenses & movements history ONLY (keep products & current stock as is)
+    await Promise.all([
+      deleteCollectionDocs(SALES_COL),
+      deleteCollectionDocs(PURCHASES_COL),
+      deleteCollectionDocs(EXPENSES_COL),
+      deleteCollectionDocs(MOVEMENTS_COL),
+      deleteCollectionDocs(SESSIONS_COL)
+    ]);
+
+    localStorage.removeItem(OFFLINE_SALES_KEY);
+  }
+}
+
 
 

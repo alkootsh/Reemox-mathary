@@ -1,3 +1,30 @@
+export function playBarcodeBeepSound() {
+  try {
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    
+    // Crisp high-frequency laser barcode scanner beep (1760Hz - A6)
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(1760, now);
+    
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+    
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    
+    osc.start(now);
+    osc.stop(now + 0.08);
+  } catch (e) {
+    console.error('Barcode audio error:', e);
+  }
+}
+
 export function playSuccessSound() {
   try {
     const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -51,5 +78,13 @@ export function playWarningSound() {
     osc.stop(now + 0.35);
   } catch (e) {
     console.error('Audio warning error:', e);
+  }
+}
+
+export function playAlertSound(type: 'warning' | 'error' | 'success' = 'warning') {
+  if (type === 'success') {
+    playSuccessSound();
+  } else {
+    playWarningSound();
   }
 }
