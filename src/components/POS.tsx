@@ -37,7 +37,13 @@ import {
   Zap,
   CheckCircle,
   Palette,
-  Layout
+  Layout,
+  HelpCircle,
+  PauseCircle,
+  PlayCircle,
+  Tag,
+  Search,
+  Keyboard
 } from 'lucide-react';
 import QrScanner from 'react-qr-scanner';
 import { Product, Customer, Sale, Payment, AppUser } from '../types/types';
@@ -70,6 +76,17 @@ export interface POSCartItem {
   unit?: string;
 }
 
+export interface SuspendedOrder {
+  id: string;
+  time: string;
+  cart: POSCartItem[];
+  selectedCustomerId?: string;
+  discountValue: number;
+  discountType: 'percentage' | 'fixed';
+  itemsCount: number;
+  total: number;
+}
+
 export default function POS({ customers }: { customers: Customer[] }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [isScanning, setIsScanning] = useState(false);
@@ -81,6 +98,21 @@ export default function POS({ customers }: { customers: Customer[] }) {
   const [discountValue, setDiscountValue] = useState<number>(0);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('cash-customer');
   const [localCustomers, setLocalCustomers] = useState<Customer[]>(customers);
+
+  // F1-F11 Function States & Modals
+  const [suspendedOrders, setSuspendedOrders] = useState<SuspendedOrder[]>(() => {
+    try {
+      const saved = localStorage.getItem('pos_suspended_orders');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+  const [isSuspendedModalOpen, setIsSuspendedModalOpen] = useState(false);
+  const [isShortcutsHelpOpen, setIsShortcutsHelpOpen] = useState(false);
+  const [isDiscountModalOpen, setIsDiscountModalOpen] = useState(false);
+  const [tempDiscountVal, setTempDiscountVal] = useState('');
+  const [tempDiscountType, setTempDiscountType] = useState<'percentage' | 'fixed'>('percentage');
 
   // Sync with prop
   useEffect(() => {
@@ -275,13 +307,63 @@ export default function POS({ customers }: { customers: Customer[] }) {
       barcodeInputRef.current?.focus();
     }, 150);
 
-    // Global Keydown listener for External Hardware Barcode Scanners & Shortcuts
+    // Global Keydown listener for External Hardware Barcode Scanners & Function Keys (F1-F11)
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
-      // F2 Shortcut to immediately focus Barcode input
+      // Intercept Function Keys F1 through F11
+      if (e.key === 'F1') {
+        e.preventDefault();
+        setIsShortcutsHelpOpen(true);
+        return;
+      }
       if (e.key === 'F2') {
         e.preventDefault();
         barcodeInputRef.current?.focus();
         barcodeInputRef.current?.select();
+        return;
+      }
+      if (e.key === 'F3') {
+        e.preventDefault();
+        setIsQuickCustomerModalOpen(true);
+        return;
+      }
+      if (e.key === 'F4') {
+        e.preventDefault();
+        handleQuickCashCheckoutAndPrintRef.current?.();
+        return;
+      }
+      if (e.key === 'F5') {
+        e.preventDefault();
+        openPaymentModalRef.current?.();
+        return;
+      }
+      if (e.key === 'F6') {
+        e.preventDefault();
+        handleHoldOrResumeOrderRef.current?.();
+        return;
+      }
+      if (e.key === 'F7') {
+        e.preventDefault();
+        setIsDiscountModalOpen(true);
+        return;
+      }
+      if (e.key === 'F8') {
+        e.preventDefault();
+        handleClearCartWithConfirmationRef.current?.();
+        return;
+      }
+      if (e.key === 'F9') {
+        e.preventDefault();
+        setShowRecentInvoicesModal(true);
+        return;
+      }
+      if (e.key === 'F10') {
+        e.preventDefault();
+        handleReprintLastInvoiceRef.current?.();
+        return;
+      }
+      if (e.key === 'F11') {
+        e.preventDefault();
+        setIsDesignSelectorOpen(true);
         return;
       }
 
@@ -705,6 +787,111 @@ export default function POS({ customers }: { customers: Customer[] }) {
     setIsPaymentModalOpen(true);
   };
 
+  // F6: Hold current order or show suspended orders modal
+  const handleHoldOrResumeOrder = () => {
+    if (cart.length > 0) {
+      const newHold: SuspendedOrder = {
+        id: `hold-${Date.now()}`,
+        time: new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }),
+        cart: [...cart],
+        selectedCustomerId,
+        discountValue,
+        discountType,
+        itemsCount: cart.reduce((sum, i) => sum + i.quantity, 0),
+        total: finalTotal
+      };
+      const updated = [newHold, ...suspendedOrders];
+      setSuspendedOrders(updated);
+      localStorage.setItem('pos_suspended_orders', JSON.stringify(updated));
+      setCart([]);
+      setDiscountValue(0);
+      playSuccessSound();
+      setToastType('success');
+      setToastMessage(`⏸️ تم تعليق الفاتورة بنجاح! (${newHold.itemsCount} أصناف) - اضغط F6 لاسترجاعها`);
+    } else if (suspendedOrders.length > 0) {
+      setIsSuspendedModalOpen(true);
+    } else {
+      playWarningSound();
+      setToastType('warning');
+      setToastMessage('لا توجد عناصر بالسلة لتعليقها، ولا توجد فواتير معلقة حالياً');
+    }
+  };
+
+  const handleRestoreSuspendedOrder = (order: SuspendedOrder) => {
+    setCart(order.cart);
+    if (order.selectedCustomerId) setSelectedCustomerId(order.selectedCustomerId);
+    setDiscountValue(order.discountValue || 0);
+    setDiscountType(order.discountType || 'percentage');
+    const updated = suspendedOrders.filter(o => o.id !== order.id);
+    setSuspendedOrders(updated);
+    localStorage.setItem('pos_suspended_orders', JSON.stringify(updated));
+    setIsSuspendedModalOpen(false);
+    playSuccessSound();
+    setToastType('success');
+    setToastMessage(`▶️ تم استرجاع الفاتورة المعلقة (${order.itemsCount} أصناف) إلى السلة!`);
+  };
+
+  const handleDeleteSuspendedOrder = (id: string) => {
+    const updated = suspendedOrders.filter(o => o.id !== id);
+    setSuspendedOrders(updated);
+    localStorage.setItem('pos_suspended_orders', JSON.stringify(updated));
+    playSuccessSound();
+    setToastType('success');
+    setToastMessage('🗑️ تم حذف الفاتورة المعلقة بنجاح');
+  };
+
+  // F8: Clear Cart with confirmation
+  const handleClearCartWithConfirmation = () => {
+    if (cart.length === 0) {
+      setToastType('warning');
+      setToastMessage('السلة فارغة بالفعل');
+      return;
+    }
+    if (confirm('هل أنت متأكد من إفراغ وإلغاء السلة الحالية؟')) {
+      setCart([]);
+      setDiscountValue(0);
+      playSuccessSound();
+      setToastType('success');
+      setToastMessage('🗑️ تم إفراغ وإلغاء السلة الحالية بنجاح');
+    }
+  };
+
+  // F10: Reprint Last Invoice
+  const handleReprintLastInvoice = () => {
+    if (completedSale) {
+      setIsReceiptModalOpen(true);
+      playSuccessSound();
+      setToastType('success');
+      setToastMessage(`🖨️ فتح طباعة آخر فاتورة مكتملة رقم #${completedSale.invoiceNumber || completedSale.id}`);
+    } else if (recentSales.length > 0) {
+      setCompletedSale(recentSales[0]);
+      setIsReceiptModalOpen(true);
+      playSuccessSound();
+      setToastType('success');
+      setToastMessage(`🖨️ فتح طباعة أحدث فاتورة مسجلة رقم #${recentSales[0].invoiceNumber || recentSales[0].id}`);
+    } else {
+      playWarningSound();
+      setToastType('warning');
+      setToastMessage('⚠️ لا توجد فواتير سابقة مسجلة لإعادة طباعتها');
+    }
+  };
+
+  // F7: Apply Quick Discount
+  const handleApplyQuickDiscount = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const val = parseFloat(tempDiscountVal);
+    if (isNaN(val) || val < 0) {
+      setDiscountValue(0);
+    } else {
+      setDiscountValue(val);
+      setDiscountType(tempDiscountType);
+    }
+    setIsDiscountModalOpen(false);
+    playSuccessSound();
+    setToastType('success');
+    setToastMessage('🏷️ تم تطبيق الخصم على الفاتورة بنجاح');
+  };
+
     // Quick Customer Creation Handler
   const handleCreateQuickCustomer = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1030,6 +1217,96 @@ export default function POS({ customers }: { customers: Customer[] }) {
     }
   };
 
+  // Payment auto-calculation handlers (Automatic cash/credit balancing)
+  const handlePaymentCashChange = (valStr: string) => {
+    const val = parseFloat(valStr);
+    const newCash = isNaN(val) ? 0 : Math.max(0, val);
+    setCashAmount(newCash);
+    const remainingCredit = Math.max(0, Math.round((finalTotal - newCash - cardAmount - walletAmount) * 100) / 100);
+    setCreditAmount(remainingCredit);
+  };
+
+  const handlePaymentCreditChange = (valStr: string) => {
+    const val = parseFloat(valStr);
+    const newCredit = isNaN(val) ? 0 : Math.max(0, val);
+    setCreditAmount(newCredit);
+    const remainingCash = Math.max(0, Math.round((finalTotal - newCredit - cardAmount - walletAmount) * 100) / 100);
+    setCashAmount(remainingCash);
+  };
+
+  const handlePaymentCardChange = (valStr: string) => {
+    const val = parseFloat(valStr);
+    const newCard = isNaN(val) ? 0 : Math.max(0, val);
+    setCardAmount(newCard);
+    const remainingCash = Math.max(0, Math.round((finalTotal - newCard - walletAmount - creditAmount) * 100) / 100);
+    setCashAmount(remainingCash);
+  };
+
+  const handlePaymentWalletChange = (valStr: string) => {
+    const val = parseFloat(valStr);
+    const newWallet = isNaN(val) ? 0 : Math.max(0, val);
+    setWalletAmount(newWallet);
+    const remainingCash = Math.max(0, Math.round((finalTotal - cashAmount - cardAmount - newWallet) * 100) / 100);
+    if (remainingCash >= 0) {
+      setCreditAmount(remainingCash);
+    } else {
+      setCashAmount(Math.max(0, Math.round((finalTotal - newWallet - cardAmount - creditAmount) * 100) / 100));
+    }
+  };
+
+  const setFullCashPayment = () => {
+    setCashAmount(finalTotal);
+    setCreditAmount(0);
+    setCardAmount(0);
+    setWalletAmount(0);
+  };
+
+  const setFullCreditPayment = () => {
+    setCreditAmount(finalTotal);
+    setCashAmount(0);
+    setCardAmount(0);
+    setWalletAmount(0);
+  };
+
+  const setHalfSplitPayment = () => {
+    const half = Math.round((finalTotal / 2) * 100) / 100;
+    setCashAmount(half);
+    setCreditAmount(Math.round((finalTotal - half) * 100) / 100);
+    setCardAmount(0);
+    setWalletAmount(0);
+  };
+
+  // Function Handler References for global keydown listener
+  const handleQuickCashCheckoutAndPrintRef = useRef(handleQuickCashCheckoutAndPrint);
+  handleQuickCashCheckoutAndPrintRef.current = handleQuickCashCheckoutAndPrint;
+
+  const openPaymentModalRef = useRef(openPaymentModal);
+  openPaymentModalRef.current = openPaymentModal;
+
+  const handleHoldOrResumeOrderRef = useRef(handleHoldOrResumeOrder);
+  handleHoldOrResumeOrderRef.current = handleHoldOrResumeOrder;
+
+  const handleClearCartWithConfirmationRef = useRef(handleClearCartWithConfirmation);
+  handleClearCartWithConfirmationRef.current = handleClearCartWithConfirmation;
+
+  const handleReprintLastInvoiceRef = useRef(handleReprintLastInvoice);
+  handleReprintLastInvoiceRef.current = handleReprintLastInvoice;
+
+  // Array of F1 to F11 function key definitions for top bar and help modal
+  const functionKeysList = [
+    { key: 'F1', title: 'مساعدة', icon: '❓', bg: 'bg-blue-600/15 text-blue-400 border-blue-500/30 hover:bg-blue-600 hover:text-white', action: () => setIsShortcutsHelpOpen(true) },
+    { key: 'F2', title: 'بحث/باركود', icon: '🔍', bg: 'bg-amber-600/15 text-amber-400 border-amber-500/30 hover:bg-amber-600 hover:text-white', action: () => { barcodeInputRef.current?.focus(); barcodeInputRef.current?.select(); } },
+    { key: 'F3', title: 'عميل', icon: '👤', bg: 'bg-indigo-600/15 text-indigo-400 border-indigo-500/30 hover:bg-indigo-600 hover:text-white', action: () => setIsQuickCustomerModalOpen(true) },
+    { key: 'F4', title: 'كاش سريع', icon: '⚡', bg: 'bg-emerald-600/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-600 hover:text-white', action: handleQuickCashCheckoutAndPrint },
+    { key: 'F5', title: 'دفع متعدد', icon: '💳', bg: 'bg-teal-600/15 text-teal-400 border-teal-500/30 hover:bg-teal-600 hover:text-white', action: openPaymentModal },
+    { key: 'F6', title: 'تعليق/استرجاع', icon: '⏸️', bg: 'bg-purple-600/15 text-purple-400 border-purple-500/30 hover:bg-purple-600 hover:text-white', badge: suspendedOrders.length, action: handleHoldOrResumeOrder },
+    { key: 'F7', title: 'خصم', icon: '🏷️', bg: 'bg-rose-600/15 text-rose-400 border-rose-500/30 hover:bg-rose-600 hover:text-white', action: () => setIsDiscountModalOpen(true) },
+    { key: 'F8', title: 'إلغاء السلة', icon: '🗑️', bg: 'bg-red-600/15 text-red-400 border-red-500/30 hover:bg-red-600 hover:text-white', action: handleClearCartWithConfirmation },
+    { key: 'F9', title: 'سجل الفواتير', icon: '📜', bg: 'bg-cyan-600/15 text-cyan-400 border-cyan-500/30 hover:bg-cyan-600 hover:text-white', action: () => setShowRecentInvoicesModal(true) },
+    { key: 'F10', title: 'إعادة طباعة', icon: '🖨️', bg: 'bg-yellow-600/15 text-yellow-400 border-yellow-500/30 hover:bg-yellow-600 hover:text-white', action: handleReprintLastInvoice },
+    { key: 'F11', title: 'المظهر', icon: '🎨', bg: 'bg-pink-600/15 text-pink-400 border-pink-500/30 hover:bg-pink-600 hover:text-white', action: () => setIsDesignSelectorOpen(true) },
+  ];
+
   return (
     <div className={`min-h-screen ${posDesign === 'dark' ? 'bg-[#0f172a] text-slate-100' : ''}`}>
       {toastMessage && (
@@ -1039,6 +1316,37 @@ export default function POS({ customers }: { customers: Customer[] }) {
           onClose={() => setToastMessage(null)} 
         />
       )}
+
+      {/* POS Top Function Keys Bar (F1 - F11) */}
+      <div className="bg-card/95 backdrop-blur-md border-b border-border p-2 sticky top-0 z-30 shadow-md">
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 pt-0.5 scrollbar-thin px-2">
+          <div className="flex items-center gap-1 pl-2 border-l border-border/60 text-[11px] font-black text-gold whitespace-nowrap">
+            <Keyboard size={14} className="text-gold" />
+            <span>أزرار الوظائف:</span>
+          </div>
+
+          {functionKeysList.map(fk => (
+            <button
+              key={fk.key}
+              type="button"
+              onClick={fk.action}
+              className={`px-2.5 py-1.2 rounded-xl border flex items-center gap-1.5 transition-all active:scale-95 text-xs font-bold shadow-sm whitespace-nowrap ${fk.bg}`}
+              title={`${fk.title} - اضغط ${fk.key}`}
+            >
+              <span className="bg-black/40 text-white px-1.5 py-0.5 rounded-md text-[10px] font-black font-mono tracking-wider">
+                {fk.key}
+              </span>
+              <span className="text-xs">{fk.icon}</span>
+              <span className="text-[11px]">{fk.title}</span>
+              {fk.badge !== undefined && fk.badge > 0 && (
+                <span className="bg-red-500 text-white text-[10px] font-black px-1.5 py-0.2 rounded-full animate-pulse">
+                  {fk.badge}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {posDesign === 'emerald' ? (
         <EmeraldPOSLayout
@@ -1759,46 +2067,85 @@ export default function POS({ customers }: { customers: Customer[] }) {
               </select>
             </div>
 
-            <div className="bg-card2 p-3.5 rounded-2xl border border-border text-center">
+            <div className="bg-card2 p-3.5 rounded-2xl border border-border text-center space-y-2">
               <p className="text-xs text-text-dim">المبلغ الإجمالي المطلوب سداده</p>
-              <p className="text-3xl font-black text-success mt-1 font-mono">{finalTotal} ج.م</p>
+              <p className="text-3xl font-black text-success font-mono">{finalTotal} ج.م</p>
+
+              {/* Quick Preset Payment Split Buttons */}
+              <div className="flex gap-1.5 pt-1">
+                <button
+                  type="button"
+                  onClick={setFullCashPayment}
+                  className="flex-1 bg-green-600/20 hover:bg-green-600 text-green-300 hover:text-white border border-green-500/30 py-1.5 rounded-xl font-bold text-[11px] transition-all flex items-center justify-center gap-1 active:scale-95"
+                >
+                  <span>💵 كاش بالكامل</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={setFullCreditPayment}
+                  className="flex-1 bg-purple-600/20 hover:bg-purple-600 text-purple-300 hover:text-white border border-purple-500/30 py-1.5 rounded-xl font-bold text-[11px] transition-all flex items-center justify-center gap-1 active:scale-95"
+                >
+                  <span>📝 آجل بالكامل</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={setHalfSplitPayment}
+                  className="flex-1 bg-blue-600/20 hover:bg-blue-600 text-blue-300 hover:text-white border border-blue-500/30 py-1.5 rounded-xl font-bold text-[11px] transition-all flex items-center justify-center gap-1 active:scale-95"
+                >
+                  <span>⚖️ 50% كاش / آجل</span>
+                </button>
+              </div>
             </div>
 
             <div className="space-y-2.5 text-xs">
               <div>
-                <label className="text-text-dim flex items-center gap-1 mb-1 font-bold"><Banknote size={14} className="text-green-400"/> نقدى (Cash)</label>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-text-dim flex items-center gap-1 font-bold"><Banknote size={14} className="text-green-400"/> نقدى (Cash)</label>
+                  <span className="text-[10px] text-text-dim">احتساب تلقائي</span>
+                </div>
                 <input 
                   type="number" 
-                  className="w-full bg-card2 border border-border p-2.5 rounded-xl font-bold font-mono text-sm"
+                  step="any"
+                  min="0"
+                  className="w-full bg-card2 border border-border p-2.5 rounded-xl font-bold font-mono text-sm focus:outline-none focus:border-green-500"
                   value={cashAmount}
-                  onChange={e => setCashAmount(Number(e.target.value))}
+                  onChange={e => handlePaymentCashChange(e.target.value)}
                 />
               </div>
               <div>
                 <label className="text-text-dim flex items-center gap-1 mb-1 font-bold"><CreditCard size={14} className="text-blue-400"/> بطاقة / فيزا (Card)</label>
                 <input 
                   type="number" 
-                  className="w-full bg-card2 border border-border p-2.5 rounded-xl font-bold font-mono text-sm"
+                  step="any"
+                  min="0"
+                  className="w-full bg-card2 border border-border p-2.5 rounded-xl font-bold font-mono text-sm focus:outline-none focus:border-blue-500"
                   value={cardAmount}
-                  onChange={e => setCardAmount(Number(e.target.value))}
+                  onChange={e => handlePaymentCardChange(e.target.value)}
                 />
               </div>
               <div>
                 <label className="text-text-dim flex items-center gap-1 mb-1 font-bold"><Wallet size={14} className="text-amber-400"/> محفظة إلكترونية (Wallet / InstaPay)</label>
                 <input 
                   type="number" 
-                  className="w-full bg-card2 border border-border p-2.5 rounded-xl font-bold font-mono text-sm"
+                  step="any"
+                  min="0"
+                  className="w-full bg-card2 border border-border p-2.5 rounded-xl font-bold font-mono text-sm focus:outline-none focus:border-amber-500"
                   value={walletAmount}
-                  onChange={e => setWalletAmount(Number(e.target.value))}
+                  onChange={e => handlePaymentWalletChange(e.target.value)}
                 />
               </div>
               <div>
-                <label className="text-text-dim flex items-center gap-1 mb-1 font-bold">آجل / ذمم (Credit)</label>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="text-text-dim flex items-center gap-1 font-bold">آجل / ذمم (Credit)</label>
+                  <span className="text-[10px] text-purple-400 font-bold">احتساب تلقائي للباقي</span>
+                </div>
                 <input 
                   type="number" 
-                  className="w-full bg-card2 border border-border p-2.5 rounded-xl font-bold font-mono text-sm"
+                  step="any"
+                  min="0"
+                  className="w-full bg-card2 border border-border p-2.5 rounded-xl font-bold font-mono text-sm focus:outline-none focus:border-purple-500"
                   value={creditAmount}
-                  onChange={e => setCreditAmount(Number(e.target.value))}
+                  onChange={e => handlePaymentCreditChange(e.target.value)}
                 />
               </div>
             </div>
@@ -1955,9 +2302,11 @@ export default function POS({ customers }: { customers: Customer[] }) {
 
                 <button 
                   onClick={() => setIsReceiptModalOpen(false)} 
-                  className="text-text-dim hover:text-danger p-1 rounded-lg"
+                  className="bg-red-500/20 hover:bg-red-600 text-red-400 hover:text-white border border-red-500/40 px-2.5 py-1 rounded-xl text-xs font-bold flex items-center gap-1 transition-all active:scale-95"
+                  title="إغلاق معاينة الفاتورة والرجوع للبيع"
                 >
-                  <X size={18} />
+                  <X size={16} />
+                  <span>رجوع / إغلاق</span>
                 </button>
               </div>
             </div>
@@ -2120,9 +2469,16 @@ export default function POS({ customers }: { customers: Customer[] }) {
                   setIsReceiptModalOpen(false);
                   setCart([]);
                 }}
-                className="bg-card2 hover:bg-card border border-border text-text-main px-4 py-3 rounded-2xl font-bold text-xs"
+                className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-3 rounded-2xl font-bold text-xs shadow-md"
               >
-                فاتورة جديدة
+                ➕ فاتورة جديدة
+              </button>
+
+              <button
+                onClick={() => setIsReceiptModalOpen(false)}
+                className="bg-red-500/20 hover:bg-red-600 border border-red-500/40 text-red-400 hover:text-white px-4 py-3 rounded-2xl font-black text-xs flex items-center justify-center gap-1 transition-all active:scale-95"
+              >
+                🔙 إغلاق والرجوع للبيع
               </button>
             </div>
           </div>
@@ -2345,6 +2701,239 @@ export default function POS({ customers }: { customers: Customer[] }) {
                   className="bg-card2 hover:bg-card border border-border px-4 py-3 rounded-2xl font-bold text-xs text-text-dim"
                 >
                   إلغاء
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================
+          F1 SHORTCUTS HELP MODAL
+          ========================================================= */}
+      {isShortcutsHelpOpen && (
+        <div className="fixed inset-0 z-[9999] bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-fadeIn">
+          <div className="bg-card p-6 rounded-3xl w-full max-w-2xl border border-border space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-blue-500/20 text-blue-400">
+                  <Keyboard size={20} />
+                </div>
+                <div>
+                  <h3 className="font-black text-base text-text-main">دليل اختصارات وأزرار الوظائف (F1 - F11)</h3>
+                  <p className="text-[11px] text-text-dim">يمكنك الضغط على الأزرار مباشرة في الكيبورد أو النقر عليها بالشاشة</p>
+                </div>
+              </div>
+              <button onClick={() => setIsShortcutsHelpOpen(false)} className="text-text-dim hover:text-danger p-1"><X size={18} /></button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-[60vh] overflow-y-auto p-1">
+              {functionKeysList.map(fk => (
+                <div key={fk.key} className="bg-card2 p-3 rounded-2xl border border-border flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <span className="bg-gold/20 text-gold font-mono font-black text-xs px-2 py-1 rounded-lg border border-gold/30">
+                      {fk.key}
+                    </span>
+                    <div>
+                      <p className="font-bold text-xs text-text-main flex items-center gap-1">
+                        <span>{fk.icon}</span>
+                        <span>{fk.title}</span>
+                      </p>
+                      <p className="text-[10px] text-text-dim mt-0.5">
+                        {fk.key === 'F1' && 'عرض قائمة الإرشادات والدليل السريع للمبيعات'}
+                        {fk.key === 'F2' && 'التركيز الفوري على خانة البحث وقارئ الباركود'}
+                        {fk.key === 'F3' && 'فتح قائمة اختيار العميل أو تسجيل عميل جديد'}
+                        {fk.key === 'F4' && 'دفع كاش فوري وإصدار وطباعة الفاتورة بضغطة واحدة'}
+                        {fk.key === 'F5' && 'فتح شاشة طرق الدفع المتعددة (كاش/فيزا/محفظة/آجل)'}
+                        {fk.key === 'F6' && 'تعليق الفاتورة الحالية أو استرجاع الفواتير المعلقة'}
+                        {fk.key === 'F7' && 'إدخال تطبيق خصم نسبة أو مبلغ على الفاتورة'}
+                        {fk.key === 'F8' && 'إلغاء وإفراغ جميع محتويات السلة الحالية'}
+                        {fk.key === 'F9' && 'فتح سجل الفواتير الأخيرة والمبيعات السابقة'}
+                        {fk.key === 'F10' && 'إعادة طباعة المعاينة لأحدث فاتورة تم إصدارها'}
+                        {fk.key === 'F11' && 'تغيير شكل ومظهر واجهة شاشة البيع (POS Themes)'}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setIsShortcutsHelpOpen(false);
+                      fk.action();
+                    }}
+                    className="bg-card hover:bg-gold hover:text-white text-[10px] font-bold px-2.5 py-1 rounded-xl border border-border transition-all whitespace-nowrap"
+                  >
+                    تشغيل
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <button
+              onClick={() => setIsShortcutsHelpOpen(false)}
+              className="w-full bg-card2 hover:bg-card border border-border py-2.5 rounded-xl font-bold text-xs text-text-dim"
+            >
+              إغلاق
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================
+          F6 SUSPENDED / HELD ORDERS MODAL
+          ========================================================= */}
+      {isSuspendedModalOpen && (
+        <div className="fixed inset-0 z-[9999] bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-fadeIn">
+          <div className="bg-card p-6 rounded-3xl w-full max-w-lg border border-purple-500/40 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-purple-500/20 text-purple-400">
+                  <PauseCircle size={20} />
+                </div>
+                <div>
+                  <h3 className="font-black text-base text-text-main">الفواتير المعلقة (F6)</h3>
+                  <p className="text-[11px] text-text-dim">استرجاع الفواتير المؤجلة للزبائن لمتابعة عملية البيع</p>
+                </div>
+              </div>
+              <button onClick={() => setIsSuspendedModalOpen(false)} className="text-text-dim hover:text-danger p-1"><X size={18} /></button>
+            </div>
+
+            <div className="max-h-96 overflow-y-auto space-y-2 text-xs">
+              {suspendedOrders.length === 0 ? (
+                <div className="text-center py-10 text-text-dim space-y-2">
+                  <p className="text-2xl">⏸️</p>
+                  <p className="font-bold">لا توجد فواتير معلقة حالياً</p>
+                  <p className="text-[10px]">لتعليق فاتورة، أضف منتجات للسلة ثم اضغط على زر F6</p>
+                </div>
+              ) : (
+                suspendedOrders.map((order, idx) => (
+                  <div key={order.id} className="bg-card2 p-3.5 rounded-2xl border border-border flex justify-between items-center gap-2">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="bg-purple-500/20 text-purple-300 px-2 py-0.5 rounded-lg font-bold text-[10px]">
+                          طلب #{idx + 1}
+                        </span>
+                        <span className="text-gold font-black">{order.total} ج.م</span>
+                      </div>
+                      <p className="text-[11px] text-text-dim mt-1">
+                        ⏰ {order.time} • 📦 {order.itemsCount} أصناف
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => handleRestoreSuspendedOrder(order)}
+                        className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1.5 rounded-xl font-bold text-xs transition-all flex items-center gap-1 shadow-sm"
+                      >
+                        <PlayCircle size={13} />
+                        <span>استرجاع</span>
+                      </button>
+                      <button
+                        onClick={() => handleDeleteSuspendedOrder(order.id)}
+                        className="bg-red-500/20 hover:bg-red-500/30 text-red-400 p-1.5 rounded-xl transition-all"
+                        title="حذف الفاتورة المعلقة"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <button
+              onClick={() => setIsSuspendedModalOpen(false)}
+              className="w-full bg-card2 hover:bg-card border border-border py-2.5 rounded-xl font-bold text-xs text-text-dim"
+            >
+              إغلاق
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================
+          F7 INVOICE DISCOUNT MODAL
+          ========================================================= */}
+      {isDiscountModalOpen && (
+        <div className="fixed inset-0 z-[9999] bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-fadeIn">
+          <div className="bg-card p-6 rounded-3xl w-full max-w-md border border-rose-500/40 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-rose-500/20 text-rose-400">
+                  <Tag size={20} />
+                </div>
+                <div>
+                  <h3 className="font-black text-base text-text-main">تطبيق خصم على الفاتورة (F7)</h3>
+                  <p className="text-[11px] text-text-dim">أدخل الخصم إما بنسبة مئوية (%) أو بمبلغ ثابت (ج.م)</p>
+                </div>
+              </div>
+              <button onClick={() => setIsDiscountModalOpen(false)} className="text-text-dim hover:text-danger p-1"><X size={18} /></button>
+            </div>
+
+            <form onSubmit={handleApplyQuickDiscount} className="space-y-4">
+              <div className="flex bg-card2 p-1 rounded-2xl border border-border">
+                <button
+                  type="button"
+                  onClick={() => setTempDiscountType('percentage')}
+                  className={`flex-1 py-2 rounded-xl font-bold text-xs transition-all ${
+                    tempDiscountType === 'percentage' ? 'bg-rose-600 text-white shadow-sm' : 'text-text-dim hover:text-text-main'
+                  }`}
+                >
+                  نسبة مئوية (%)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTempDiscountType('fixed')}
+                  className={`flex-1 py-2 rounded-xl font-bold text-xs transition-all ${
+                    tempDiscountType === 'fixed' ? 'bg-rose-600 text-white shadow-sm' : 'text-text-dim hover:text-text-main'
+                  }`}
+                >
+                  مبلغ ثابت (ج.م)
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-text-dim mb-1.5">قيمة الخصم:</label>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={tempDiscountVal}
+                  onChange={e => setTempDiscountVal(e.target.value)}
+                  placeholder={tempDiscountType === 'percentage' ? 'مثال: 10 (%)' : 'مثال: 50 (ج.م)'}
+                  className="w-full bg-card2 border border-border p-3 rounded-2xl text-center font-bold text-lg focus:outline-none focus:border-rose-500"
+                  autoFocus
+                />
+              </div>
+
+              {/* Quick Preset Buttons */}
+              <div className="flex gap-1.5 flex-wrap">
+                {(tempDiscountType === 'percentage' ? [5, 10, 15, 20, 25] : [10, 20, 50, 100, 200]).map(val => (
+                  <button
+                    key={val}
+                    type="button"
+                    onClick={() => setTempDiscountVal(val.toString())}
+                    className="flex-1 bg-card2 hover:bg-rose-600 hover:text-white border border-border py-1.5 rounded-xl font-bold text-xs transition-all"
+                  >
+                    {val} {tempDiscountType === 'percentage' ? '%' : 'ج.م'}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="submit"
+                  className="flex-1 bg-rose-600 hover:bg-rose-700 text-white py-3 rounded-2xl font-black text-xs transition-all shadow-md active:scale-95"
+                >
+                  حفظ وتطبيق الخصم
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDiscountValue(0);
+                    setIsDiscountModalOpen(false);
+                  }}
+                  className="bg-card2 hover:bg-card border border-border px-4 py-3 rounded-2xl font-bold text-xs text-text-dim"
+                >
+                  إلغاء الخصم
                 </button>
               </div>
             </form>

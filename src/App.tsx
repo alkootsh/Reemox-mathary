@@ -616,17 +616,19 @@ export default function App() {
                   <button onClick={() => setCurrentScreen('customers')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'customers' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>👥 <span className="text-[10px] mt-1">العملاء</span></button>
                   <button onClick={() => setCurrentScreen('categories')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'categories' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🏷️ <span className="text-[10px] mt-1">التصنيفات</span></button>
                   <button onClick={() => setCurrentScreen('order-management')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'order-management' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📋 <span className="text-[10px] mt-1">الطلبات</span></button>
-                  <button onClick={() => setCurrentScreen('settings')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'settings' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>⚙️ <span className="text-[10px] mt-1">الإعدادات والمستخدمين</span></button>
+                  <button onClick={() => setCurrentScreen('settings')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'settings' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>⚙️ <span className="text-[10px] mt-1">الإعدادات</span></button>
+                  <button onClick={handleLogout} className="flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl bg-danger/20 border border-danger/40 text-danger hover:bg-danger hover:text-white transition-colors">🚪 <span className="text-[10px] mt-1 font-bold">تسجيل خروج</span></button>
                 </>
               )}
 
-              {/* Cashier sees POS, Fast POS, Session & Orders */}
+              {/* Cashier sees POS, Fast POS, Session & Orders + Direct Logout */}
               {currentUser.role === 'cashier' && (
                 <>
                   <button onClick={() => setCurrentScreen('pos')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'pos' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🛒 <span className="text-xs mt-1">نقطة البيع (POS)</span></button>
                   <button onClick={() => setCurrentScreen('fast-pos')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'fast-pos' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>⚡ <span className="text-xs mt-1">بيع سريع</span></button>
                   <button onClick={() => setCurrentScreen('cashier-session')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'cashier-session' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🔐 <span className="text-xs mt-1">الوردية وتقرير Z</span></button>
                   <button onClick={() => setCurrentScreen('order-management')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'order-management' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📋 <span className="text-xs mt-1">الطلبات والفواتير</span></button>
+                  <button onClick={handleLogout} className="flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl bg-danger/20 border border-danger/40 text-danger hover:bg-danger hover:text-white transition-colors">🚪 <span className="text-xs mt-1 font-bold">تسجيل الخروج</span></button>
                 </>
               )}
 
