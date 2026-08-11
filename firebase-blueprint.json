@@ -1,17 +1,52 @@
 {
   "entities": {
+    "Company": {
+      "title": "Company",
+      "description": "Tenant company entity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "code": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "Branch": {
+      "title": "Branch",
+      "description": "Company branch entity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "companyId": { "type": "string" },
+        "name": { "type": "string" }
+      },
+      "required": ["id", "companyId", "name"]
+    },
+    "Membership": {
+      "title": "Membership",
+      "description": "User company membership & role mapping",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "companyId": { "type": "string" },
+        "role": { "type": "string" }
+      },
+      "required": ["id", "userId", "companyId", "role"]
+    },
     "Product": {
       "title": "Product",
       "description": "Inventory product entity",
       "type": "object",
       "properties": {
         "id": { "type": "string" },
+        "companyId": { "type": "string" },
         "name": { "type": "string" },
         "sku": { "type": "string" },
         "price": { "type": "number" },
         "quantity": { "type": "number" }
       },
-      "required": ["id", "name", "sku", "price", "quantity"]
+      "required": ["id", "companyId", "name", "sku", "price", "quantity"]
     },
     "Category": {
       "title": "Category",
@@ -19,9 +54,10 @@
       "type": "object",
       "properties": {
         "id": { "type": "string" },
+        "companyId": { "type": "string" },
         "name": { "type": "string" }
       },
-      "required": ["id", "name"]
+      "required": ["id", "companyId", "name"]
     },
     "Customer": {
       "title": "Customer",
@@ -29,26 +65,40 @@
       "type": "object",
       "properties": {
         "id": { "type": "string" },
+        "companyId": { "type": "string" },
         "name": { "type": "string" },
         "phone": { "type": "string" },
         "openingBalance": { "type": "number" }
       },
-      "required": ["id", "name", "phone", "openingBalance"]
+      "required": ["id", "companyId", "name", "phone", "openingBalance"]
     },
     "Sale": {
-        "title": "Sale",
-        "description": "Sale transaction entity",
-        "type": "object",
-        "properties": {
-            "id": { "type": "string" },
-            "customer": { "type": "string" },
-            "total": { "type": "number" },
-            "date": { "type": "string" }
-        },
-        "required": ["id", "customer", "total", "date"]
+      "title": "Sale",
+      "description": "Sale transaction entity",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "companyId": { "type": "string" },
+        "customer": { "type": "string" },
+        "total": { "type": "number" },
+        "date": { "type": "string" }
+      },
+      "required": ["id", "companyId", "total", "date"]
     }
   },
   "firestore": {
+    "/companies/{companyId}": {
+      "schema": "Company",
+      "description": "All tenant companies"
+    },
+    "/branches/{branchId}": {
+      "schema": "Branch",
+      "description": "Company branches"
+    },
+    "/memberships/{membershipId}": {
+      "schema": "Membership",
+      "description": "Company user memberships"
+    },
     "/products/{productId}": {
       "schema": "Product",
       "description": "All products in inventory"
@@ -62,8 +112,8 @@
       "description": "All customers"
     },
     "/sales/{saleId}": {
-        "schema": "Sale",
-        "description": "All sales transactions"
+      "schema": "Sale",
+      "description": "All sales transactions"
     }
   }
 }

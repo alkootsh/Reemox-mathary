@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { Sale, Customer } from '../types/types';
-import { ShoppingCart } from 'lucide-react';
+import { ShoppingCart, Home } from 'lucide-react';
 
-export default function ActivityLog({ sales, customers }: { sales: Sale[], customers: Customer[] }) {
+export default function ActivityLog({ sales, customers, onNavigateHome }: { sales: Sale[], customers: Customer[], onNavigateHome?: () => void }) {
     const [searchTerm, setSearchTerm] = useState('');
     const [dateFilter, setDateFilter] = useState('');
 
@@ -19,7 +19,18 @@ export default function ActivityLog({ sales, customers }: { sales: Sale[], custo
 
     return (
         <div className="p-4 sm:p-5 pb-28 max-w-4xl mx-auto space-y-4">
-            <h2 className="text-xl sm:text-2xl font-bold">سجل المبيعات والفواتير</h2>
+            <div className="flex justify-between items-center flex-wrap gap-2">
+                <h2 className="text-xl sm:text-2xl font-bold">سجل المبيعات والفواتير</h2>
+                {onNavigateHome && (
+                    <button
+                        onClick={onNavigateHome}
+                        className="bg-gold/20 hover:bg-gold text-gold hover:text-white border border-gold/30 px-3.5 py-2 rounded-2xl font-bold text-xs flex items-center gap-1.5 shadow-sm transition-all active:scale-95"
+                    >
+                        <Home size={16} />
+                        <span>العودة للرئيسية</span>
+                    </button>
+                )}
+            </div>
             <div className="flex flex-col sm:flex-row gap-3">
                 <input placeholder="بحث برقم الفاتورة أو العميل..." className="bg-card2 border border-border p-3 rounded-2xl flex-1 text-sm focus:outline-none focus:border-gold" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
                 <input type="date" className="bg-card2 border border-border p-3 rounded-2xl text-sm focus:outline-none focus:border-gold" value={dateFilter} onChange={e => setDateFilter(e.target.value)} />

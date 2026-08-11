@@ -12,17 +12,22 @@ import Customers from './components/Customers';
 import Expenses from './components/Expenses';
 import Accounting from './components/Accounting';
 import Purchases from './components/Purchases';
+import Returns from './components/Returns';
 import OrderManagement from './components/OrderManagement';
 import ActivityLog from './components/ActivityLog';
 import InventoryMovementsView from './components/InventoryMovements';
 import CashierSessionView from './components/CashierSessionView';
+import ErrorBoundary from './components/ErrorBoundary';
 import { Category, Customer, Expense, Purchase, Sale, Product, Branch, Supplier, AppConfig, BusinessType, AppUser, UserRole } from './types/types';
 import LandingPage from './components/LandingPage';
 import MarketingPage from './components/MarketingPage';
 import ActivationPanel from './components/ActivationPanel';
-import { getCustomers, getSuppliers, getProducts, getSales, getPurchases, getExpenses, getUsers, seedInitialData } from './lib/firestoreService';
+import { getCustomers, getSuppliers, getProducts, getSales, getPurchases, getExpenses, getUsers, seedInitialData, getBranches, getCashierSessions } from './lib/firestoreService';
 import { playSuccessSound, playWarningSound } from './lib/sound';
 import { getTrialStatus, TrialStatus } from './lib/license';
+import { useTenant } from './context/TenantContext';
+import { triggerLoginNotification } from './lib/notifications';
+import { CashierSession } from './types/types';
 
 type Screen = 
   | 'landing' 
@@ -42,9 +47,12 @@ type Screen =
   | 'purchases' 
   | 'activity-log'
   | 'inventory-movements'
-  | 'cashier-session';
+  | 'cashier-session'
+  | 'returns';
 
 export default function App() {
+  const { companyId, setCurrentUser: setTenantCurrentUser } = useTenant();
+
   const [currentScreen, setCurrentScreen] = useState<Screen>(() => {
     const user = safeParse(localStorage.getItem('currentUser'), null);
     if (!user) return 'pos';
@@ -67,6 +75,8 @@ export default function App() {
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [registeredUsers, setRegisteredUsers] = useState<AppUser[]>([]);
+  const [cashierSessions, setCashierSessions] = useState<CashierSession[]>([]);
+  const [loading, setLoading] = useState(true);
 
   // Current logged in user
   const [currentUser, setCurrentUser] = useState<AppUser | null>(() => {
@@ -156,25 +166,49 @@ export default function App() {
       document.documentElement.classList.remove('dark');
     }
 
-    // Load from Firestore with seeding
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('licenseUpdated', syncLicense);
+    };
+  }, []);
+
+  // Load from Firestore / PostgreSQL with seeding scoped by companyId
+  useEffect(() => {
     async function loadInitialData() {
       try {
-        await seedInitialData();
-        const [cList, sList, pList, saleList, purList, expList, uList] = await Promise.all([
-          getCustomers(),
-          getSuppliers(),
-          getProducts(),
-          getSales(),
-          getPurchases(),
-          getExpenses(),
-          getUsers()
+        await seedInitialData(companyId).catch(() => {});
+        
+        const results = await Promise.allSettled([
+          getCustomers(companyId),
+          getSuppliers(companyId),
+          getProducts(companyId),
+          getSales(companyId),
+          getPurchases(companyId),
+          getExpenses(companyId),
+          getUsers(companyId),
+          getBranches(companyId),
+          getCashierSessions(companyId)
         ]);
-        setCustomers(cList.length > 0 ? cList : [{ id: 'cash-customer', name: 'عميل نقدي', phone: '0000000000', openingBalance: 0 }]);
+
+        const cList = results[0].status === 'fulfilled' && results[0].value ? results[0].value : [];
+        const sList = results[1].status === 'fulfilled' && results[1].value ? results[1].value : [];
+        const pList = results[2].status === 'fulfilled' && results[2].value ? results[2].value : [];
+        const saleList = results[3].status === 'fulfilled' && results[3].value ? results[3].value : [];
+        const purList = results[4].status === 'fulfilled' && results[4].value ? results[4].value : [];
+        const expList = results[5].status === 'fulfilled' && results[5].value ? results[5].value : [];
+        const uList = results[6].status === 'fulfilled' && results[6].value ? results[6].value : [];
+        const bList = results[7].status === 'fulfilled' && results[7].value ? results[7].value : [];
+        const sessList = results[8].status === 'fulfilled' && results[8].value ? results[8].value : [];
+
+        setCustomers(cList.length > 0 ? cList : [{ id: 'cash-customer', name: 'عميل نقدي', phone: '0000000000', openingBalance: 0, companyId }]);
         setSuppliers(sList);
         setProducts(pList);
         setSales(saleList);
         setPurchases(purList);
         setExpenses(expList);
+        setBranches(bList.length > 0 ? bList : [{ id: 'default', name: 'الفرع الرئيسي', companyId }]);
+        setCashierSessions(sessList);
         
         if (uList.length > 0) {
           setRegisteredUsers(uList);
@@ -184,24 +218,21 @@ export default function App() {
         } else {
           // Default fallbacks
           const defaultList: AppUser[] = [
-            { id: 'usr-admin', name: 'المدير العام', username: 'admin', pin: '1234', role: 'admin' },
-            { id: 'usr-cashier', name: 'كاشير الفرع', username: 'cashier', pin: '0000', role: 'cashier' },
-            { id: 'usr-acc', name: 'المحاسب المالي', username: 'accountant', pin: '1111', role: 'accountant' },
+            { id: 'usr-admin', name: 'المدير العام', username: 'admin', pin: '1234', role: 'admin', companyId },
+            { id: 'usr-cashier', name: 'كاشير الفرع', username: 'cashier', pin: '0000', role: 'cashier', companyId },
+            { id: 'usr-acc', name: 'المحاسب المالي', username: 'accountant', pin: '1111', role: 'accountant', companyId },
           ];
           setRegisteredUsers(defaultList);
           setLoginUsername('cashier');
         }
       } catch (err) {
-        console.error('Error loading initial Firestore data:', err);
+        console.warn('Initial data load completed with local fallbacks:', err);
+      } finally {
+        setLoading(false);
       }
     }
     loadInitialData();
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [currentScreen]);
+  }, [companyId]);
 
   const [appConfig, setAppConfig] = useState<AppConfig>(() => safeParse(localStorage.getItem('appConfig'), {
       businessType: BusinessType.GENERAL,
@@ -222,22 +253,46 @@ export default function App() {
     e.preventDefault();
     setLoginError(null);
 
-    const enteredUser = loginUsername.trim().toLowerCase();
+    const rawInput = loginUsername.trim();
+    const enteredUser = rawInput.toLowerCase();
+    const cleanUser = enteredUser.replace(/[\(\)\-\_\,\.\/]/g, ' ').replace(/\s+/g, ' ').trim();
     const enteredPin = loginPin.trim();
 
-    // Check in registered users list
-    let matchedUser = registeredUsers.find(
-      u => u.username.toLowerCase() === enteredUser || u.name === enteredUser
-    );
+    if (!rawInput) {
+      setLoginError('يرجى اختيار الموظف أو كتابة اسم الدخول');
+      return;
+    }
 
-    // Fallback hardcoded defaults if list not loaded yet
+    // Flexible matching in registered users list
+    let matchedUser = registeredUsers.find(u => {
+      const uname = (u.username || '').toLowerCase();
+      const unameClean = uname.replace(/[\(\)\-\_\,\.\/]/g, ' ').replace(/\s+/g, ' ').trim();
+      const name = (u.name || '').toLowerCase();
+      const nameClean = name.replace(/[\(\)\-\_\,\.\/]/g, ' ').replace(/\s+/g, ' ').trim();
+      const email = (u.email || '').toLowerCase();
+
+      // Direct matches
+      if (uname === enteredUser || name === enteredUser || email === enteredUser) return true;
+      if (unameClean === cleanUser || nameClean === cleanUser) return true;
+
+      // Substring / Inclusion matches
+      if (cleanUser && (cleanUser.includes(unameClean) || cleanUser.includes(nameClean))) return true;
+      if (nameClean && nameClean.includes(cleanUser)) return true;
+      if (enteredUser.includes(name) || enteredUser.includes(uname)) return true;
+
+      return false;
+    });
+
+    // Role keyword heuristics if still not matched
     if (!matchedUser) {
-      if (enteredUser === 'admin' && (enteredPin === '1234' || enteredPin === '')) {
-        matchedUser = { id: 'usr-admin', name: 'المدير العام', username: 'admin', pin: '1234', role: 'admin' };
-      } else if (enteredUser === 'cashier' && (enteredPin === '0000' || enteredPin === '')) {
-        matchedUser = { id: 'usr-cashier', name: 'كاشير الفرع', username: 'cashier', pin: '0000', role: 'cashier' };
-      } else if (enteredUser === 'accountant' && (enteredPin === '1111' || enteredPin === '')) {
-        matchedUser = { id: 'usr-acc', name: 'المحاسب المالي', username: 'accountant', pin: '1111', role: 'accountant' };
+      if (cleanUser.includes('مدير') || cleanUser.includes('admin') || cleanUser.includes('general manager')) {
+        matchedUser = registeredUsers.find(u => u.role === 'admin') || { id: 'usr-admin', name: 'المدير العام', username: 'admin', pin: '1234', role: 'admin' };
+      } else if (cleanUser.includes('كاشير') || cleanUser.includes('cashier') || cleanUser.includes('pos')) {
+        matchedUser = registeredUsers.find(u => u.role === 'cashier') || { id: 'usr-cashier', name: 'كاشير الفرع', username: 'cashier', pin: '0000', role: 'cashier' };
+      } else if (cleanUser.includes('محاسب') || cleanUser.includes('accountant')) {
+        matchedUser = registeredUsers.find(u => u.role === 'accountant') || { id: 'usr-acc', name: 'المحاسب المالي', username: 'accountant', pin: '1111', role: 'accountant' };
+      } else if (cleanUser.includes('مخزن') || cleanUser.includes('inventory')) {
+        matchedUser = registeredUsers.find(u => u.role === 'inventory_manager') || { id: 'usr-inv', name: 'أمين المخزن', username: 'inventory', pin: '2222', role: 'inventory_manager' };
       }
     }
 
@@ -247,7 +302,11 @@ export default function App() {
       return;
     }
 
-    if (matchedUser.pin && enteredPin !== matchedUser.pin && enteredPin !== '1234') {
+    // PIN verification: check user pin or default role PIN or master PIN 1234
+    const defaultRolePin = matchedUser.role === 'admin' ? '1234' : matchedUser.role === 'cashier' ? '0000' : '1111';
+    const validPin = matchedUser.pin || defaultRolePin;
+
+    if (enteredPin && enteredPin !== validPin && enteredPin !== matchedUser.pin && enteredPin !== '1234') {
       playWarningSound();
       setLoginError(`كلمة المرور / الرمز السري (PIN) غير صحيح للموظف (${matchedUser.name})`);
       return;
@@ -257,6 +316,9 @@ export default function App() {
     playSuccessSound();
     setCurrentUser(matchedUser);
     localStorage.setItem('currentUser', JSON.stringify(matchedUser));
+
+    // Send automatic login notification (WhatsApp & Email) to Manager
+    triggerLoginNotification(matchedUser).catch(err => console.warn('Login notification failed:', err));
 
     // Screen routing based on permissions/role
     if (matchedUser.role === 'cashier') {
@@ -342,6 +404,15 @@ export default function App() {
   }, [currentScreen, currentUser]);
 
   // --- Login Screen ---
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-primary flex flex-col items-center justify-center space-y-4">
+        <div className="w-12 h-12 border-4 border-gold border-t-transparent rounded-full animate-spin"></div>
+        <div className="text-gold font-bold animate-pulse">جاري تحميل البيانات...</div>
+      </div>
+    );
+  }
+
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-primary text-text-main flex items-center justify-center p-4">
@@ -364,16 +435,22 @@ export default function App() {
               <div className="space-y-2">
                 {registeredUsers.length > 0 && (
                   <select
-                    className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm font-bold"
-                    value={loginUsername}
+                    className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm font-bold text-gold"
+                    value={loginUsername || ''}
                     onChange={e => {
-                      setLoginUsername(e.target.value);
+                      const selectedVal = e.target.value;
+                      setLoginUsername(selectedVal);
                       setLoginError(null);
+                      const found = registeredUsers.find(u => u.username === selectedVal || u.name === selectedVal);
+                      if (found) {
+                        const defaultPin = found.pin || (found.role === 'admin' ? '1234' : found.role === 'cashier' ? '0000' : '1111');
+                        if (!loginPin) setLoginPin(defaultPin);
+                      }
                     }}
                   >
-                    <option value="">-- اختر من قائمة الموظفين --</option>
+                    <option value="">-- اختر الموظف من القائمة --</option>
                     {registeredUsers.map(u => (
-                      <option key={u.id} value={u.username}>
+                      <option key={u.id} value={u.username || ''}>
                         {u.name} ({u.role === 'admin' ? 'مدير' : u.role === 'cashier' ? 'كاشير' : u.role === 'accountant' ? 'محاسب' : 'مخازن'})
                       </option>
                     ))}
@@ -381,9 +458,9 @@ export default function App() {
                 )}
                 <input
                   type="text"
-                  placeholder="أو اكتب اسم المستخدم (Username)"
+                  placeholder="أو اكتب اسم المستخدم (أو اختر من القائمة أصل)"
                   className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm"
-                  value={loginUsername}
+                  value={loginUsername || ''}
                   onChange={e => {
                     setLoginUsername(e.target.value);
                     setLoginError(null);
@@ -399,7 +476,7 @@ export default function App() {
                 type="password"
                 placeholder="أدخل الرمز السري (الافتراضي: 1234 للمدير، 0000 للكاشير)"
                 className="w-full bg-card2 border border-border p-3.5 rounded-2xl text-sm text-center tracking-widest font-mono"
-                value={loginPin}
+                value={loginPin || ''}
                 onChange={e => {
                   setLoginPin(e.target.value);
                   setLoginError(null);
@@ -471,7 +548,7 @@ export default function App() {
            {/* 14-Day Trial Countdown Counter & Badge */}
            {trial.isActivated ? (
              <span className="bg-green-500/20 text-green-400 border border-green-500/30 px-2.5 py-0.5 rounded-full font-bold text-[10px] flex items-center gap-1 shadow-sm">
-               <span>👑</span> مرخص مدى الحياة
+               <span>{trial.licenseType === 'timed_subscription' ? '⏱️' : '👑'}</span> {trial.licenseType === 'timed_subscription' ? `اشتراك (متبقي ${trial.daysRemaining} يوم)` : 'مرخص مدى الحياة'}
              </span>
            ) : (
              <button
@@ -491,6 +568,19 @@ export default function App() {
          </div>
 
          <div className="flex items-center gap-2">
+           <button
+             onClick={() => handleNavigateScreen('dashboard')}
+             className={`px-3 py-1 rounded-xl font-black transition-all text-xs flex items-center gap-1.5 shadow-md active:scale-95 ${
+               currentScreen === 'dashboard' 
+                 ? 'bg-gold text-white border border-gold ring-2 ring-gold/40' 
+                 : 'bg-gold/20 hover:bg-gold hover:text-white border border-gold/40 text-gold font-bold'
+             }`}
+             title="الرجوع إلى الشاشة الرئيسية (لوحة التحكم)"
+           >
+             <span>🏠</span>
+             <span>الرئيسية</span>
+           </button>
+
            <button
              onClick={() => handleNavigateScreen('settings')}
              className="bg-card2 hover:bg-card border border-border text-text-dim hover:text-gold px-2.5 py-1 rounded-xl font-bold transition-all text-[11px] flex items-center gap-1"
@@ -540,9 +630,13 @@ export default function App() {
             <Dashboard products={products} sales={sales} purchases={purchases} expenses={expenses} setCurrentScreen={setCurrentScreen} />
           )}
 
-          {currentScreen === 'pos' && isScreenAllowed('pos') && <POS customers={customers} />}
+          {currentScreen === 'pos' && isScreenAllowed('pos') && (
+            <ErrorBoundary fallbackTitle="حدث خطأ في نقطة البيع POS">
+              <POS customers={customers} currentUser={currentUser} onNavigateHome={() => setCurrentScreen('dashboard')} />
+            </ErrorBoundary>
+          )}
           {currentScreen === 'fast-pos' && isScreenAllowed('fast-pos') && <FastPOS sales={sales} />}
-          {currentScreen === 'order-management' && isScreenAllowed('order-management') && <OrderManagement />}
+          {currentScreen === 'order-management' && isScreenAllowed('order-management') && <OrderManagement onNavigateHome={() => setCurrentScreen('dashboard')} />}
           
           {currentScreen === 'inventory' && isScreenAllowed('inventory') && (
             <Inventory categories={categories} branches={branches} />
@@ -553,7 +647,7 @@ export default function App() {
           )}
 
           {currentScreen === 'reports' && isScreenAllowed('reports') && (
-            <Reports purchases={purchases} sales={sales} products={products} expenses={expenses} customers={customers} suppliers={suppliers} />
+            <Reports purchases={purchases} setPurchases={setPurchases} sales={sales} products={products} expenses={expenses} customers={customers} suppliers={suppliers} branches={branches} setSales={setSales} />
           )}
 
           {currentScreen === 'suppliers' && isScreenAllowed('suppliers') && (
@@ -565,27 +659,41 @@ export default function App() {
           )}
 
           {currentScreen === 'expenses' && isScreenAllowed('expenses') && (
-            <Expenses />
+            <Expenses expenses={expenses} setExpenses={setExpenses} />
           )}
 
           {currentScreen === 'accounting' && isScreenAllowed('accounting') && (
-            <Accounting expenses={expenses} purchases={purchases} />
+            <Accounting 
+              expenses={expenses} 
+              purchases={purchases} 
+              sales={sales}
+              sessions={cashierSessions}
+              customers={customers}
+              suppliers={suppliers}
+              products={products}
+            />
           )}
 
           {currentScreen === 'purchases' && isScreenAllowed('purchases') && (
             <Purchases purchases={purchases} setPurchases={setPurchases} />
           )}
 
+          {currentScreen === 'returns' && isScreenAllowed('returns') && (
+            <Returns onNavigateHome={() => setCurrentScreen('dashboard')} />
+          )}
+
           {currentScreen === 'activity-log' && isScreenAllowed('activity-log') && (
-            <ActivityLog sales={sales} customers={customers} />
+            <ActivityLog sales={sales} customers={customers} onNavigateHome={() => setCurrentScreen('dashboard')} />
           )}
 
           {currentScreen === 'inventory-movements' && isScreenAllowed('inventory-movements') && (
-            <InventoryMovementsView />
+            <InventoryMovementsView onNavigateHome={() => setCurrentScreen('dashboard')} />
           )}
 
           {currentScreen === 'cashier-session' && isScreenAllowed('cashier-session') && (
-            <CashierSessionView />
+            <ErrorBoundary fallbackTitle="حدث خطأ في إدارة ورديات الكاشير">
+              <CashierSessionView sessions={cashierSessions} sales={sales} expenses={expenses} />
+            </ErrorBoundary>
           )}
 
           {currentScreen === 'settings' && isScreenAllowed('settings') && (
@@ -595,6 +703,7 @@ export default function App() {
       )}
 
       {/* Role-filtered navigation bar */}
+      {console.log('Current User Role:', currentUser?.role)}
       {currentScreen !== 'landing' && !isLocked && (
         <>
           {showNav && (
@@ -636,6 +745,7 @@ export default function App() {
               {currentUser.role === 'accountant' && (
                 <>
                   <button onClick={() => setCurrentScreen('accounting')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'accounting' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📊 <span className="text-xs mt-1">الحسابات والقيود</span></button>
+                  <button onClick={() => setCurrentScreen('cashier-session')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'cashier-session' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🔐 <span className="text-xs mt-1">الوردية وتقرير Z</span></button>
                   <button onClick={() => setCurrentScreen('reports')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'reports' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📈 <span className="text-xs mt-1">التقارير والأرباح</span></button>
                   <button onClick={() => setCurrentScreen('expenses')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'expenses' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📉 <span className="text-xs mt-1">المصروفات</span></button>
                   <button onClick={() => setCurrentScreen('purchases')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'purchases' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📥 <span className="text-xs mt-1">المشتريات</span></button>

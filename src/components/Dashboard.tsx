@@ -156,7 +156,7 @@ export default function Dashboard({
         {/* Alert Header */}
         <div className="p-4 sm:p-5 bg-gradient-to-r from-card2 via-card to-card2 border-b border-border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
           <div className="flex items-center gap-3">
-            <div className={`p-2.5 rounded-2xl ${allReorderProducts.length > 0 ? 'bg-amber-500/20 text-amber-400 animate-pulse' : 'bg-emerald-500/20 text-emerald-400'}`}>
+            <div className={`p-2.5 rounded-2xl ${allReorderProducts.length > 0 ? 'bg-amber-500/20 text-amber-700 dark:text-amber-400 animate-pulse' : 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-400'}`}>
               {allReorderProducts.length > 0 ? <AlertTriangle size={22} /> : <PackageCheck size={22} />}
             </div>
             <div>
@@ -169,7 +169,7 @@ export default function Dashboard({
                     {allReorderProducts.length} صنف بحاجة للتوريد
                   </span>
                 ) : (
-                  <span className="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 text-[10px] font-black px-2.5 py-0.5 rounded-full">
+                  <span className="bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30 text-[10px] font-black px-2.5 py-0.5 rounded-full">
                     المخزون آمن ومكتمل ✅
                   </span>
                 )}
@@ -295,11 +295,11 @@ export default function Dashboard({
 
               <div className="bg-card2 p-3.5 rounded-2xl border border-border flex flex-col justify-between">
                 <span className="text-[11px] text-text-dim font-bold flex items-center gap-1">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-600 dark:bg-emerald-400"></span>
                   <span>مستوى سلامة المخزون العام</span>
                 </span>
                 <div className="flex items-baseline justify-between mt-2">
-                  <span className="text-xl font-black text-emerald-400 font-mono">
+                  <span className="text-xl font-black text-emerald-600 dark:text-emerald-400 font-mono">
                     {products.length > 0 ? Math.round(((products.length - allReorderProducts.length) / products.length) * 100) : 100}%
                   </span>
                   <span className="text-[10px] text-text-dim">{products.length - allReorderProducts.length} من {products.length} آمن</span>
@@ -388,8 +388,8 @@ export default function Dashboard({
 
                           <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border whitespace-nowrap ${
                             isZero 
-                              ? 'bg-rose-500/20 text-rose-400 border-rose-500/30' 
-                              : 'bg-amber-500/20 text-amber-400 border-amber-500/30'
+                              ? 'bg-rose-500/20 text-rose-700 dark:text-rose-400 border-rose-500/30' 
+                              : 'bg-amber-500/20 text-amber-700 dark:text-amber-400 border-amber-500/30'
                           }`}>
                             {isZero ? '🔴 نفد تماماً' : '🟡 عند حد الطلب'}
                           </span>
@@ -399,7 +399,7 @@ export default function Dashboard({
                         <div className="space-y-1 bg-card p-2.5 rounded-xl border border-border/80">
                           <div className="flex justify-between items-center text-[11px]">
                             <span className="text-text-dim">الرصيد الحالي بالمخزن:</span>
-                            <span className={`font-black font-mono text-xs ${isZero ? 'text-rose-400' : 'text-amber-400'}`}>
+                            <span className={`font-black font-mono text-xs ${isZero ? 'text-rose-600 dark:text-rose-400' : 'text-amber-600 dark:text-amber-400'}`}>
                               {product.quantity} {product.isWeighted ? (product.weightUnit || 'كجم') : 'قطعة'}
                             </span>
                           </div>
@@ -442,7 +442,7 @@ export default function Dashboard({
                         <button
                           type="button"
                           onClick={() => handleQuickWhatsAppSupplierOrder(product)}
-                          className="bg-emerald-500/10 hover:bg-emerald-500 text-emerald-400 hover:text-white border border-emerald-500/30 p-1.5 rounded-xl transition-all flex items-center justify-center text-[11px]"
+                          className="bg-emerald-500/10 hover:bg-emerald-500 text-emerald-700 dark:text-emerald-400 hover:text-white border border-emerald-500/30 p-1.5 rounded-xl transition-all flex items-center justify-center text-[11px]"
                           title="طلب سريع من المورد عبر واتساب"
                         >
                           <MessageCircle size={14} />
@@ -483,9 +483,9 @@ export default function Dashboard({
         <div className="bg-card p-4 rounded-3xl border border-border space-y-1 shadow-sm">
           <div className="flex justify-between items-center text-text-dim text-xs">
             <span>إجمالي المشتريات</span>
-            <span className="p-1.5 rounded-xl bg-blue-500/10 text-blue-400">📦</span>
+            <span className="p-1.5 rounded-xl bg-blue-500/10 text-blue-600 dark:text-blue-400">📦</span>
           </div>
-          <p className="text-2xl font-black text-blue-400 font-mono">{totalPurchases.toLocaleString()} ج.م</p>
+          <p className="text-2xl font-black text-blue-600 dark:text-blue-400 font-mono">{totalPurchases.toLocaleString()} ج.م</p>
           <p className="text-[10px] text-text-dim flex items-center gap-1">
             <span>فواتير الشراء:</span>
             <strong className="text-text-main font-bold">{purchases.length}</strong>
@@ -495,9 +495,9 @@ export default function Dashboard({
         <div className="bg-card p-4 rounded-3xl border border-border space-y-1 shadow-sm">
           <div className="flex justify-between items-center text-text-dim text-xs">
             <span>إجمالي المصروفات</span>
-            <span className="p-1.5 rounded-xl bg-red-500/10 text-red-400">📉</span>
+            <span className="p-1.5 rounded-xl bg-red-500/10 text-red-600 dark:text-red-400">📉</span>
           </div>
-          <p className="text-2xl font-black text-red-400 font-mono">{totalExpenses.toLocaleString()} ج.م</p>
+          <p className="text-2xl font-black text-red-600 dark:text-red-400 font-mono">{totalExpenses.toLocaleString()} ج.م</p>
           <p className="text-[10px] text-text-dim flex items-center gap-1">
             <span>نثريات ومصروفات:</span>
             <strong className="text-text-main font-bold">{expenses.length}</strong>
@@ -507,9 +507,9 @@ export default function Dashboard({
         <div className="bg-card p-4 rounded-3xl border border-border space-y-1 shadow-sm">
           <div className="flex justify-between items-center text-text-dim text-xs">
             <span>الصافي التقديري</span>
-            <span className="p-1.5 rounded-xl bg-green-500/10 text-green-400">💰</span>
+            <span className="p-1.5 rounded-xl bg-green-500/10 text-green-600 dark:text-green-400">💰</span>
           </div>
-          <p className="text-2xl font-black text-green-400 font-mono">{estimatedProfit.toLocaleString()} ج.م</p>
+          <p className="text-2xl font-black text-green-600 dark:text-green-400 font-mono">{estimatedProfit.toLocaleString()} ج.م</p>
           <p className="text-[10px] text-text-dim flex items-center gap-1">
             <span>هامش الربح الإجمالي</span>
           </p>

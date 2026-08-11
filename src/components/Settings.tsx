@@ -4,8 +4,6 @@ import { safeParse } from '../lib/json';
 import ActivationPanel from './ActivationPanel';
 import UserManagement from './UserManagement';
 import DeveloperKeygenSuite from './DeveloperKeygenSuite';
-import { db } from '../lib/firebase';
-import { collection, getDocs, addDoc } from 'firebase/firestore';
 import Toast from './Toast';
 import { playSuccessSound, playWarningSound, playAlertSound } from '../lib/sound';
 import { 
@@ -14,7 +12,8 @@ import {
   SystemResetMode,
   saveProduct,
   saveCustomer,
-  saveSupplier
+  saveSupplier,
+  seedArabicDemoData
 } from '../lib/firestoreService';
 import { POSDesignType } from './pos/POSDesignSelectorModal';
 import { 
@@ -32,6 +31,8 @@ import {
   buildLowStockMessage,
   buildDailySalesSummaryMessage
 } from '../lib/notifications';
+import TreasuryWarehouseModal from './TreasuryWarehouseModal';
+import UnitsModal from './UnitsModal';
 import { 
   MessageSquare, 
   Mail, 
@@ -57,7 +58,11 @@ import {
   Sparkles,
   Zap,
   Monitor,
-  Moon
+  Moon,
+  Vault,
+  Building2,
+  Store,
+  Scale
 } from 'lucide-react';
 
 export default function Settings({ appConfig, setAppConfig }: { appConfig: AppConfig; setAppConfig: (config: AppConfig) => void; }) {
@@ -122,6 +127,10 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
   const [posViewMode, setPosViewMode] = useState<'image-grid' | 'compact-list'>(() => {
     return (localStorage.getItem('posViewMode') as any) || 'image-grid';
   });
+
+  // Treasury & Warehouse Modal State
+  const [isTreasuryModalOpen, setIsTreasuryModalOpen] = useState(false);
+  const [isUnitsModalOpen, setIsUnitsModalOpen] = useState(false);
 
   // Database Reset Modal States
   const [isResetModalOpen, setIsResetModalOpen] = useState(false);
@@ -610,6 +619,31 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
     }
   };
 
+  const [isSeeding, setIsSeeding] = useState(false);
+
+  const handleSeedDemoData = async () => {
+    try {
+      setIsSeeding(true);
+      const res = await seedArabicDemoData();
+      playSuccessSound();
+      setToast({
+        message: `✅ تم إضافة البيانات التجريبية بنجاح! تم توليد ${res.productsSeed} منتجاً، ${res.suppliersSeed} مورداً، و ${res.customersSeed} عميلاً.`,
+        type: 'success'
+      });
+      setTimeout(() => {
+        window.location.reload();
+      }, 2500);
+    } catch (err: any) {
+      playWarningSound();
+      setToast({
+        message: `⚠️ حدث خطأ أثناء توليد البيانات التجريبية: ${err.message || err}`,
+        type: 'warning'
+      });
+    } finally {
+      setIsSeeding(false);
+    }
+  };
+
   return (
     <div className="p-4 sm:p-5 max-w-4xl mx-auto space-y-4 pb-28">
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
@@ -626,6 +660,148 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
         </div>
         <button onClick={toggleTheme} className="bg-accent text-white px-4 py-2.5 rounded-2xl font-bold hover:opacity-90 transition-opacity">
            {isDark ? '☀️ الوضع النهاري' : '🌙 الوضع الليلي'}
+        </button>
+      </div>
+
+      {/* Treasuries & Warehouses Quick Access Card */}
+      <div className="bg-card p-5 rounded-4xl border border-gold/40 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+        <div className="flex items-center gap-3">
+          <div className="bg-gold/10 p-3 rounded-2xl text-gold border border-gold/30">
+            <Vault size={22} />
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-text-main">إدارة الخزن النقدية والمخازن المتعددة</h3>
+            <p className="text-xs text-text-dim mt-0.5">إضافة خزن نقدية جديدة، مخازن فرعية، وتخصيص أرصدة النظام</p>
+          </div>
+        </div>
+        <button
+          onClick={() => setIsTreasuryModalOpen(true)}
+          className="bg-gold hover:bg-gold2 text-white px-5 py-2.5 rounded-2xl font-bold text-xs shadow flex items-center gap-2 transition-all active:scale-95 whitespace-nowrap w-full sm:w-auto justify-center"
+        >
+          <Building2 size={16} />
+          <span>➕ إضافة خزن ومخازن جديدة</span>
+        </button>
+      </div>
+
+      {/* Units Management Quick Access Card */}
+      <div className="bg-card p-5 rounded-4xl border border-gold/40 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+        <div className="flex items-center gap-3">
+          <div className="bg-gold/10 p-3 rounded-2xl text-gold border border-gold/30">
+            <Scale size={22} />
+          </div>
+          <div>
+            <h3 className="text-sm font-bold text-text-main">دليل ووحدات القياس الرسمية (Units Guide)</h3>
+            <p className="text-xs text-text-dim mt-0.5">إدارة وتخصيص وحدات القياس الافتراضية للسيستم (قطعة، علبة، كرتونة، كيلو، لتر، طرد...)</p>
+          </div>
+        </div>
+        <button
+          onClick={() => setIsUnitsModalOpen(true)}
+          className="bg-gold hover:bg-gold2 text-white px-5 py-2.5 rounded-2xl font-bold text-xs shadow flex items-center gap-2 transition-all active:scale-95 whitespace-nowrap w-full sm:w-auto justify-center"
+        >
+          <Scale size={16} />
+          <span>⚙️ إدارة الوحدات المحددة مسبقاً</span>
+        </button>
+      </div>
+
+      {/* Clear Cache Setting */}
+      <div className="bg-card p-5 rounded-4xl border border-border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+        <div>
+           <h3 className="text-sm font-bold text-red-500">مسح البيانات المؤقتة (Cache)</h3>
+           <p className="text-xs text-text-dim mt-1">مسح الكاش والملفات المؤقتة لحل أي بطء مع الحفاظ التام على بيانات PostgreSQL والتفعيل والمستخدمين</p>
+        </div>
+        <button 
+          type="button"
+          onClick={async () => {
+            try {
+              const keysToKeep = [
+                'machineID',
+                'activationKey',
+                'activationDate',
+                'currentUser',
+                'tenant_company_id',
+                'tenant_branch_id',
+                'developerPassword',
+                'businessName',
+                'businessAddress',
+                'businessPhone',
+                'businessTax',
+                'businessLogoUrl',
+                'currency',
+                'invoiceNotes',
+                'taxRate',
+                'taxEnabled',
+                'taxType',
+                'paperSize',
+                'showLogo',
+                'allowCashierPriceEdit',
+                'preventSellBelowCost',
+                'requireSupervisorPinForPriceEdit',
+                'posDesign',
+                'posTouchMode',
+                'posPrimaryColor',
+                'posButtonSize',
+                'posViewMode',
+                'theme',
+                'managerWhatsApp',
+                'managerWhatsAppCountryCode',
+                'managerEmail',
+                'notify_low_stock',
+                'notify_daily_summary',
+                'notify_price_override',
+                'notify_purchase',
+                'notify_preferred_method'
+              ];
+              const backup: { [key: string]: string } = {};
+              keysToKeep.forEach(k => {
+                const v = localStorage.getItem(k);
+                if (v !== null) backup[k] = v;
+              });
+              
+              localStorage.clear();
+              
+              Object.entries(backup).forEach(([k, v]) => {
+                localStorage.setItem(k, v);
+              });
+              
+              sessionStorage.clear();
+
+              if ('caches' in window) {
+                try {
+                  const cacheKeys = await caches.keys();
+                  await Promise.all(cacheKeys.map(key => caches.delete(key)));
+                } catch (e) {
+                  console.warn('Cache storage clear warning:', e);
+                }
+              }
+
+              setToast({ message: 'تم مسح البيانات المؤقتة (Cache) بنجاح', type: 'success' });
+              playSuccessSound();
+              setTimeout(() => {
+                window.location.reload();
+              }, 600);
+            } catch (err) {
+              console.error('Error clearing cache:', err);
+              window.location.reload();
+            }
+          }}
+          className="bg-red-600 text-white px-4 py-2.5 rounded-2xl font-bold hover:opacity-90 transition-opacity active:scale-95 text-xs shadow-md"
+        >
+           🗑️ مسح البيانات المؤقتة
+        </button>
+      </div>
+
+      {/* Demo Data Seeding */}
+      <div className="bg-card p-5 rounded-4xl border border-border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+        <div>
+           <h3 className="text-sm font-bold text-blue-600 dark:text-blue-400">🎁 إضافة بيانات تجريبية (أصناف وموردين وعملاء)</h3>
+           <p className="text-xs text-text-dim mt-1">توليد بيانات محاسبية تجريبية فورية لتجربة ميزات النظام والبيع السريع بضغطة واحدة</p>
+        </div>
+        <button
+          onClick={handleSeedDemoData}
+          disabled={isSeeding}
+          className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-500 text-white px-5 py-2.5 rounded-2xl font-bold transition-all disabled:opacity-50 flex items-center justify-center gap-1.5"
+        >
+          {isSeeding ? '⏳ جاري إضافة البيانات...' : '⚡ إضافة بيانات تجريبية'}
         </button>
       </div>
       
@@ -713,11 +889,11 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
         </div>
 
         {/* Informative Explanation Banner */}
-        <div className="bg-emerald-500/10 border border-emerald-500/30 p-3 rounded-2xl flex items-start gap-2.5 text-xs text-emerald-200 leading-relaxed">
-          <CheckCircle2 size={18} className="text-emerald-400 flex-shrink-0 mt-0.5" />
+        <div className="bg-emerald-500/10 border border-emerald-500/30 p-3 rounded-2xl flex items-start gap-2.5 text-xs text-emerald-800 dark:text-emerald-200 leading-relaxed">
+          <CheckCircle2 size={18} className="text-emerald-600 dark:text-emerald-400 flex-shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <p className="font-bold text-emerald-300">طريقة عمل الإشعارات (مباشرة 100% وتلقائية):</p>
-            <p className="text-[11px] text-emerald-200/90">
+            <p className="font-bold text-emerald-900 dark:text-emerald-300">طريقة عمل الإشعارات (مباشرة 100% وتلقائية):</p>
+            <p className="text-[11px] text-emerald-700 dark:text-emerald-200/90">
               • <strong>واتساب المباشر (Direct WhatsApp):</strong> يعمل فوراً وبدون أي اشتراكات أو خوادم خارجية — يفتح محادثة واتساب منسقة بضغطة زر أو نافذة سريعة عند حدوث نقص مخزون أو تقفيل الوردية.
               <br />
               • <strong>الإرسال التلقائي عبر السيرفر:</strong> يدعم خادم Twilio لواتساب وخادم SMTP للبريد الإلكتروني عند توفر بيانات الربط.
@@ -922,7 +1098,7 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
 
           {/* Test Result Message Box */}
           {testResult && (
-            <div className={`p-3 rounded-2xl border text-xs flex items-start gap-2 animate-fadeIn ${testResult.success ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300' : 'bg-amber-500/10 border-amber-500/40 text-amber-300'}`}>
+            <div className={`p-3 rounded-2xl border text-xs flex items-start gap-2 animate-fadeIn ${testResult.success ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-800 dark:text-emerald-300' : 'bg-amber-500/10 border-amber-500/40 text-amber-800 dark:text-amber-300'}`}>
               {testResult.success ? <CheckCircle2 size={16} className="flex-shrink-0 mt-0.5" /> : <AlertTriangle size={16} className="flex-shrink-0 mt-0.5" />}
               <div className="flex-1">
                 <p className="font-bold">{testResult.success ? 'نتيجة الفحص ناجحة:' : 'تنبيه الفحص والتشخيص:'}</p>
@@ -970,7 +1146,12 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
             <input 
               type="checkbox" 
               checked={taxEnabled} 
-              onChange={e => setTaxEnabled(e.target.checked)} 
+              onChange={e => {
+                const checked = e.target.checked;
+                setTaxEnabled(checked);
+                localStorage.setItem('taxEnabled', checked.toString());
+                window.dispatchEvent(new Event('taxSettingsUpdated'));
+              }} 
               className="sr-only peer"
             />
             <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gold"></div>
@@ -1549,13 +1730,13 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
 
       {/* Database Reset Interactive Modal */}
       {isResetModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-card max-w-xl w-full rounded-3xl border border-red-500/40 p-6 space-y-5 shadow-2xl animate-in zoom-in-95 duration-200">
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-card max-w-xl w-full max-h-[92vh] overflow-y-auto rounded-3xl border border-red-500/40 p-5 sm:p-6 space-y-4 shadow-2xl animate-in zoom-in-95 duration-200 my-auto">
             {/* Header */}
-            <div className="flex items-center justify-between border-b border-border pb-3">
+            <div className="flex items-center justify-between border-b border-border pb-3 sticky top-0 bg-card z-10 pt-1">
               <div className="flex items-center gap-2 text-red-400">
                 <Trash2 size={22} />
-                <h3 className="text-lg font-black">خيارات مسح وإعادة ضبط قاعدة البيانات</h3>
+                <h3 className="text-base sm:text-lg font-black">خيارات مسح وإعادة ضبط قاعدة البيانات</h3>
               </div>
               <button
                 type="button"
@@ -1815,6 +1996,18 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
           </div>
         )}
       </div>
+
+      {/* Treasury & Warehouse Modal */}
+      <TreasuryWarehouseModal
+        isOpen={isTreasuryModalOpen}
+        onClose={() => setIsTreasuryModalOpen(false)}
+      />
+
+      {/* Units Manager Modal */}
+      <UnitsModal
+        isOpen={isUnitsModalOpen}
+        onClose={() => setIsUnitsModalOpen(false)}
+      />
     </div>
   );
 }

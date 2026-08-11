@@ -15,6 +15,49 @@ export enum BusinessType {
   AUTO_SPARE_PARTS = 'قطع غيار سيارات وموتسيكلات وتوكتوك',
 }
 
+export interface Company {
+  id: string;
+  name: string;
+  code?: string;
+  taxNumber?: string;
+  phone?: string;
+  address?: string;
+  logoUrl?: string;
+  ownerId?: string;
+  createdAt?: string;
+}
+
+export interface Branch {
+  id: string;
+  companyId: string;
+  name: string;
+  code?: string;
+  address?: string;
+  phone?: string;
+  isMain?: boolean;
+}
+
+export interface Membership {
+  id: string;
+  userId: string;
+  companyId: string;
+  role: UserRole;
+  branchIds?: string[];
+  defaultBranchId?: string;
+  status: 'ACTIVE' | 'INVITED' | 'DISABLED';
+  createdAt?: string;
+}
+
+export interface TenantContextType {
+  companyId: string;
+  branchId: string;
+  company: Company | null;
+  activeBranch: Branch | null;
+  branches: Branch[];
+  currentUser: AppUser | null;
+  membership: Membership | null;
+}
+
 export interface ProductUnit {
   name: string; // e.g. "علبة", "شريط", "قرص", "كرتونة", "قطعة", "دستة"
   conversionFactor: number; // e.g. 1 for base unit (علبة), 0.3333 for strip if 3 strips in a box (or quantity of base units per 1 unit)
@@ -36,9 +79,13 @@ export interface Product {
   id: string;
   name: string;
   sku: string;
+  barcode?: string;
   barcodes?: string[];
   serial?: string;
-  price: number;
+  price: number; // Retail price
+  wholesalePrice?: number; // سعر الجملة
+  halfWholesalePrice?: number; // سعر نص جملة
+  minPrice?: number; // اقل سعر بيع
   cost: number;
   quantity: number;
   colors?: string[];
@@ -63,26 +110,26 @@ export interface Product {
   stripsPerBox?: number; // عدد الأشرطة بالعلبة
   stripPrice?: number; // سعر بيع الشريط
   stripBarcode?: string; // باركود الشريط
-}
-
-export interface Branch {
-  id: string;
-  name: string;
+  companyId?: string;
 }
 
 export interface Category {
   id: string;
   name: string;
   subcategories?: string[];
+  companyId?: string;
 }
 
 export interface Customer {
   id: string;
   name: string;
   phone: string;
+  customerType?: 'retail' | 'half_wholesale' | 'wholesale'; // نوع العميل
   openingBalance: number;
   currentBalance?: number;
   whatsappReminders?: boolean;
+  creditLimit?: number;
+  companyId?: string;
 }
 
 export interface Supplier {
@@ -95,6 +142,7 @@ export interface Supplier {
   currentBalance?: number;
   purchases?: { id: string, amount: number, date: string }[];
   payments?: { id: string, amount: number, date: string }[];
+  companyId?: string;
 }
 
 export interface AppConfig {
@@ -113,6 +161,9 @@ export interface PurchaseItem {
   productName: string;
   quantity: number;
   cost: number;
+  unit?: string;
+  notes?: string;
+  barcode?: string;
 }
 
 export interface Purchase {
@@ -125,6 +176,9 @@ export interface Purchase {
   paidAmount: number;
   date: string;
   branchId?: string;
+  companyId?: string;
+  notes?: string;
+  invoiceNumber?: string;
 }
 
 export type SaleStatus = 'paid' | 'unpaid' | 'partially-paid' | 'returned' | 'COMPLETED';
@@ -144,6 +198,8 @@ export interface SaleItem {
   color?: string;
   size?: string;
   unitCost?: number;
+  notes?: string;
+  barcode?: string;
 }
 
 export interface InventoryCountItem {
@@ -195,6 +251,7 @@ export interface Sale {
   invoiceNumber?: string;
   customerId: string;
   customerName: string;
+  saleType?: 'retail' | 'half_wholesale' | 'wholesale'; // نوع الفاتورة
   items: SaleItem[];
   total: number;
   subtotal?: number;
@@ -221,8 +278,10 @@ export interface Sale {
   status: SaleStatus;
   dueDate?: string;
   branchId?: string;
+  companyId?: string;
   userId?: string;
   userName?: string;
+  cashierName?: string;
   isReturned?: boolean;
 }
 
@@ -241,6 +300,7 @@ export interface InventoryMovement {
   productId: string;
   productName: string;
   branchId: string;
+  companyId?: string;
   warehouseId?: string;
   movementType: MovementType;
   quantity: number;
@@ -257,7 +317,13 @@ export interface InventoryMovement {
 export interface CashierSession {
   id: string;
   cashierName: string;
+  cashierId?: string;
   branchId: string;
+  companyId?: string;
+  treasuryId?: string;
+  treasuryName?: string;
+  warehouseId?: string;
+  warehouseName?: string;
   openingCash: number;
   openedAt: string;
   status: 'OPEN' | 'ACTIVE' | 'CLOSED';
@@ -282,6 +348,7 @@ export interface Expense {
   date: string;
   notes?: string;
   branchId?: string;
+  companyId?: string;
 }
 
 export type UserRole = 'admin' | 'cashier' | 'accountant' | 'inventory_manager';
@@ -290,11 +357,18 @@ export interface AppUser {
   id: string;
   name: string;
   username: string;
+  email?: string;
   pin: string;
   role: UserRole;
+  cashierType?: 'retail' | 'wholesale'; // نوع الكاشير
+  treasuryId?: string;
+  treasuryName?: string;
+  warehouseId?: string;
+  warehouseName?: string;
   phone?: string;
   allowedScreens?: string[];
   branchId?: string;
+  companyId?: string;
   createdAt?: string;
   canEditPrice?: boolean;
   canGiveDiscount?: boolean;

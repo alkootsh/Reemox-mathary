@@ -43,19 +43,26 @@ import {
   PlayCircle,
   Tag,
   Search,
-  Keyboard
+  Keyboard,
+  Home
 } from 'lucide-react';
 import QrScanner from 'react-qr-scanner';
-import { Product, Customer, Sale, Payment, AppUser } from '../types/types';
+import { Product, Customer, Sale, Payment, AppUser, CashierSession } from '../types/types';
 import { 
   processSale, 
+  deleteSale,
   getUsers, 
   saveCustomer, 
   getOfflineSales, 
   saveOfflineSale, 
   syncOfflineSalesToFirestore, 
-  isOnline 
+  isOnline,
+  getProducts,
+  getSales,
+  saveProduct,
+  getCashierSessions
 } from '../lib/firestoreService';
+import { triggerSaleNotification } from '../lib/notifications';
 import { verifyDeveloperPassword } from '../lib/license';
 import { db } from '@/src/lib/firebase';
 import { collection, getDocs, query, orderBy, limit } from 'firebase/firestore';
@@ -64,6 +71,7 @@ import Toast from './Toast';
 import POSDesignSelectorModal, { POSDesignType } from './pos/POSDesignSelectorModal';
 import EmeraldPOSLayout from './pos/EmeraldPOSLayout';
 import TouchPOSLayout from './pos/TouchPOSLayout';
+import ClassicPOSLayout from './pos/ClassicPOSLayout';
 
 export interface POSCartItem {
   product: Product;
@@ -74,6 +82,8 @@ export interface POSCartItem {
   color?: string;
   size?: string;
   unit?: string;
+  notes?: string;
+  barcode?: string;
 }
 
 export interface SuspendedOrder {
@@ -87,9 +97,24 @@ export interface SuspendedOrder {
   total: number;
 }
 
-export default function POS({ customers }: { customers: Customer[] }) {
+export default function POS({ customers, currentUser, onNavigateHome }: { customers: Customer[]; currentUser: AppUser | null; onNavigateHome?: () => void }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [isScanning, setIsScanning] = useState(false);
+  const [sales, setSales] = useState<Sale[]>([]);
+  const [activeSession, setActiveSession] = useState<CashierSession | null>(null);
+
+  useEffect(() => {
+    async function loadStats() {
+      const [sList, sessList] = await Promise.all([getSales(currentUser?.companyId), getCashierSessions(currentUser?.companyId)]);
+      setSales(sList);
+      setActiveSession(sessList.find(s => s.status === 'ACTIVE' || s.status === 'OPEN') || null);
+    }
+    loadStats();
+  }, [currentUser]);
+
+  const sessionSales = activeSession ? sales.filter(s => new Date(s.date).getTime() >= new Date(activeSession.openedAt).getTime() && s.cashierName === currentUser?.name) : [];
+  const totalSales = sessionSales.reduce((sum, s) => sum + (s.finalTotal || s.total || 0), 0);
+  const totalInvoices = sessionSales.length;
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [toastType, setToastType] = useState<'success' | 'warning'>('warning');
   const [cart, setCart] = useState<POSCartItem[]>([]);
@@ -127,20 +152,21 @@ export default function POS({ customers }: { customers: Customer[] }) {
   const [newCustomerPhone, setNewCustomerPhone] = useState('');
   const [newCustomerBalance, setNewCustomerBalance] = useState('0');
   const [isSavingCustomer, setIsSavingCustomer] = useState(false);
+
+  // Quick Product Creation
+  const [isQuickProductModalOpen, setIsQuickProductModalOpen] = useState(false);
+  const [newProductName, setNewProductName] = useState('');
+  const [newProductSku, setNewProductSku] = useState('');
+  const [newProductPrice, setNewProductPrice] = useState('');
+  const [newProductCost, setNewProductCost] = useState('');
+  const [newProductQuantity, setNewProductQuantity] = useState('10');
+  const [isSavingProduct, setIsSavingProduct] = useState(false);
   
   // Price Editing States
   const [editingPriceIndex, setEditingPriceIndex] = useState<number | null>(null);
   const [tempPriceValue, setTempPriceValue] = useState<string>('');
   
   // Current User & POS Price Permissions
-  const [currentUser, setCurrentUser] = useState<AppUser | null>(() => {
-    const saved = localStorage.getItem('currentUser');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (e) { return null; }
-    }
-    return null;
-  });
-
   const [allowCashierPriceEdit, setAllowCashierPriceEdit] = useState<boolean>(() => {
     return localStorage.getItem('allowCashierPriceEdit') !== 'false';
   });
@@ -184,6 +210,8 @@ export default function POS({ customers }: { customers: Customer[] }) {
   const [printLayout, setPrintLayout] = useState<'thermal80' | 'standardA4'>('thermal80');
   const [recentSales, setRecentSales] = useState<Sale[]>([]);
   const [showRecentInvoicesModal, setShowRecentInvoicesModal] = useState(false);
+  const [posSaleToDelete, setPosSaleToDelete] = useState<Sale | null>(null);
+  const [isDeletingPosSale, setIsDeletingPosSale] = useState(false);
   const [whatsAppPhoneInput, setWhatsAppPhoneInput] = useState('');
 
   // Dynamic Tax Settings
@@ -224,8 +252,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
   
   const fetchProducts = async () => {
     try {
-      const querySnapshot = await getDocs(collection(db, 'products'));
-      const productsData = querySnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Product));
+      const productsData = await getProducts();
       setProducts(productsData);
     } catch (e) {
       console.error('Error fetching products:', e);
@@ -234,10 +261,8 @@ export default function POS({ customers }: { customers: Customer[] }) {
 
   const fetchRecentSales = async () => {
     try {
-      const q = query(collection(db, 'sales'), orderBy('date', 'desc'), limit(15));
-      const snap = await getDocs(q);
-      const salesList = snap.docs.map(doc => ({ ...doc.data(), id: doc.id } as Sale));
-      setRecentSales(salesList);
+      const salesList = await getSales();
+      setRecentSales(salesList.slice(0, 15));
     } catch (e) {
       console.error('Error fetching recent sales:', e);
     }
@@ -271,7 +296,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
     const handleUserSync = () => {
       const saved = localStorage.getItem('currentUser');
       if (saved) {
-        try { setCurrentUser(JSON.parse(saved)); } catch (e) { /* ignore */ }
+        try { /* Sync not needed as currentUser is passed as prop */ } catch (e) { /* ignore */ }
       }
     };
 
@@ -486,6 +511,29 @@ export default function POS({ customers }: { customers: Customer[] }) {
     if (!scannedCode || !scannedCode.trim()) return;
     const cleanCode = scannedCode.trim();
 
+    // Handle weight-based barcode (EAN-13, starts with 2)
+    if (cleanCode.length === 13 && cleanCode.startsWith('2')) {
+        const productId = cleanCode.substring(1, 6);
+        const weightPart = cleanCode.substring(6, 11);
+        const weightInGrams = parseInt(weightPart, 10);
+        const weightInKg = weightInGrams / 1000;
+        
+        const matched = products.find(p => p.sku === productId || p.barcode === productId);
+        
+        if (matched && matched.isWeighted) {
+             addToCart(matched, undefined, undefined, 'كجم', undefined, weightInKg);
+             playBarcodeBeepSound();
+             setToastType('success');
+             setToastMessage(`⚖️ تم مسح ميزان: ${matched.name} (${weightInKg} كجم)`);
+             setSearchTerm('');
+             setTimeout(() => {
+                barcodeInputRef.current?.focus();
+                barcodeInputRef.current?.select();
+             }, 50);
+             return;
+        }
+    }
+
     // Check if barcode matches stripBarcode specifically
     const stripMatch = products.find(p => 
       p.stripBarcode && p.stripBarcode.toLowerCase() === cleanCode.toLowerCase()
@@ -682,14 +730,14 @@ export default function POS({ customers }: { customers: Customer[] }) {
     )
   );
 
-  const addToCart = (product: Product, color?: string, size?: string, unit: string = 'علبة', customPrice?: number) => {
+  const addToCart = (product: Product, color?: string, size?: string, unit: string = 'علبة', customPrice?: number, preDefinedQuantity?: number) => {
     if (product.quantity <= (product.lowStockThreshold ?? 5)) {
       setToastType('warning');
       setToastMessage(`تحذير: المنتج قارب على النفاذ (${product.quantity} متبقي بالمخزن)`);
     }
     
-    let quantityToUse = 1;
-    if (product.isWeighted) {
+    let quantityToUse = preDefinedQuantity ?? 1;
+    if (!preDefinedQuantity && product.isWeighted) {
       const weight = prompt(`أدخل الوزن بـ ${product.weightUnit || 'كجم'} للمنتج ${product.name}`);
       if (!weight) return;
       quantityToUse = parseFloat(weight);
@@ -930,6 +978,52 @@ export default function POS({ customers }: { customers: Customer[] }) {
     }
   };
 
+  // Quick Product Creation Handler
+  const handleCreateQuickProduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newProductName.trim()) {
+      alert('يرجى كتابة اسم الصنف!');
+      return;
+    }
+
+    try {
+      setIsSavingProduct(true);
+      const productData = {
+        name: newProductName.trim(),
+        sku: newProductSku.trim() || `sku-${Date.now().toString().slice(-6)}`,
+        price: parseFloat(newProductPrice) || 0,
+        cost: parseFloat(newProductCost) || 0,
+        quantity: parseFloat(newProductQuantity) || 0,
+        unlimitedStock: false,
+        barcode: newProductSku.trim() || `sku-${Date.now().toString().slice(-6)}`
+      };
+
+      const newId = await saveProduct(productData);
+      const fullProduct: Product = {
+        ...productData,
+        id: newId || `prod-${Date.now()}`
+      } as Product;
+
+      setProducts(prev => [fullProduct, ...prev]);
+      addToCart(fullProduct);
+
+      setIsQuickProductModalOpen(false);
+      setNewProductName('');
+      setNewProductSku('');
+      setNewProductPrice('');
+      setNewProductCost('');
+      setNewProductQuantity('10');
+
+      playSuccessSound();
+      setToastType('success');
+      setToastMessage(`تم تسجيل الصنف (${fullProduct.name}) وإضافته للفاتورة بنجاح!`);
+    } catch (err: any) {
+      alert('خطأ أثناء حفظ المنتج: ' + err.message);
+    } finally {
+      setIsSavingProduct(false);
+    }
+  };
+
   // WhatsApp Share Handler
   const handleSendWhatsApp = () => {
     if (!completedSale) return;
@@ -949,13 +1043,27 @@ export default function POS({ customers }: { customers: Customer[] }) {
       msg += `▪ ${i.name} × ${i.quantity} = ${i.price * i.quantity} ج.م\n`;
     });
     msg += `--------------------------------\n`;
-    msg += `*المجموع المطلوب: ${completedSale.finalTotal} ج.م*\n`;
-    if (completedSale.status === 'paid') {
+    msg += `*الصافي الإجمالي المطلوب: ${completedSale.finalTotal} ج.م*\n`;
+    
+    const nonCreditPaymentsSum = (completedSale.payments || [])
+      .filter(p => p.method !== 'credit')
+      .reduce((sum, p) => sum + (p.amount || 0), 0);
+    const creditPaymentsSum = (completedSale.payments || [])
+      .filter(p => p.method === 'credit')
+      .reduce((sum, p) => sum + (p.amount || 0), 0);
+
+    const paidAmt = nonCreditPaymentsSum > 0 ? nonCreditPaymentsSum : (completedSale.paidAmount || 0);
+    const creditAmt = creditPaymentsSum > 0 ? creditPaymentsSum : (completedSale.remainingAmount || (completedSale.finalTotal - paidAmt));
+
+    if (completedSale.status === 'paid' || (creditAmt <= 0 && completedSale.paymentMethod !== 'credit')) {
       msg += `حالة السداد: مدفوع بالكامل ✅\n`;
-    } else if (completedSale.status === 'partially-paid') {
-      msg += `حالة السداد: مدفوع جزئياً ⏳\n`;
+    } else if (completedSale.status === 'partially-paid' || (paidAmt > 0 && creditAmt > 0)) {
+      msg += `حالة السداد: آجل جزئي (مدفوع مقدم ومتبقي آجل) ⏳\n`;
+      msg += `💵 المبلغ المدفوع (نقداً/فيزا): ${paidAmt.toFixed(2)} ج.م\n`;
+      msg += `🔴 المتبقي الآجل على الحساب: ${creditAmt.toFixed(2)} ج.م\n`;
     } else {
-      msg += `حالة السداد: آجل / ذمة على الحساب 📝\n`;
+      msg += `حالة السداد: آجل كلي (على الحساب) 🔴\n`;
+      msg += `🔴 المديونية الآجلة المطلوب سدادها: ${(creditAmt || completedSale.finalTotal).toFixed(2)} ج.م\n`;
     }
     msg += `شكراً لتعاملكم معنا 🙏`;
 
@@ -1108,6 +1216,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
         invoiceNumber: savedInvoiceNumber || `INV-${Date.now().toString().slice(-6)}`
       };
       setCompletedSale(completedRecord);
+      triggerSaleNotification(completedRecord).catch(err => console.warn('Sale notification failed:', err));
       setWhatsAppPhoneInput(customer?.phone || '');
       setRecentSales(prev => [completedRecord, ...prev]);
 
@@ -1345,6 +1454,30 @@ export default function POS({ customers }: { customers: Customer[] }) {
               )}
             </button>
           ))}
+
+          <div className="h-5 w-[1px] bg-border/60 mx-1.5 flex-shrink-0" />
+
+          {/* إضافة صنف سريع */}
+          <button
+            type="button"
+            onClick={() => setIsQuickProductModalOpen(true)}
+            className="px-2.5 py-1 rounded-xl border border-gold/30 bg-gold/10 hover:bg-gold hover:text-white text-gold text-xs font-bold shadow-sm whitespace-nowrap transition-all active:scale-95 flex items-center gap-1.5"
+            title="إضافة صنف جديد سريعاً"
+          >
+            <span>📦</span>
+            <span>+ صنف جديد</span>
+          </button>
+
+          {/* إضافة عميل سريع */}
+          <button
+            type="button"
+            onClick={() => setIsQuickCustomerModalOpen(true)}
+            className="px-2.5 py-1 rounded-xl border border-indigo-500/30 bg-indigo-500/10 hover:bg-indigo hover:text-white text-indigo-400 text-xs font-bold shadow-sm whitespace-nowrap transition-all active:scale-95 flex items-center gap-1.5"
+            title="إضافة عميل جديد سريعاً"
+          >
+            <span>👤</span>
+            <span>+ عميل جديد</span>
+          </button>
         </div>
       </div>
 
@@ -1412,6 +1545,46 @@ export default function POS({ customers }: { customers: Customer[] }) {
           onOpenDesignSelector={() => setIsDesignSelectorOpen(true)}
           onOpenQuickCustomerModal={() => setIsQuickCustomerModalOpen(true)}
           onOpenRecentSales={() => setShowRecentInvoicesModal(true)}
+          orderNumber={recentSales.length + 1}
+        />
+      ) : posDesign === 'classic' ? (
+        <ClassicPOSLayout
+          products={products}
+          customers={localCustomers}
+          cart={cart}
+          searchTerm={searchTerm}
+          setSearchTerm={setSearchTerm}
+          barcodeInputRef={barcodeInputRef}
+          selectedCustomerId={selectedCustomerId}
+          setSelectedCustomerId={setSelectedCustomerId}
+          onAddToCart={addToCart}
+          onRemoveFromCart={removeFromCart}
+          onUpdateQuantity={updateCartQuantity}
+          onChangeUnit={changeCartItemUnit}
+          subtotal={subtotal}
+          discountAmount={discountAmount}
+          discountValue={discountValue}
+          setDiscountValue={setDiscountValue}
+          discountType={discountType}
+          setDiscountType={setDiscountType}
+          taxAmount={taxAmount}
+          finalTotal={finalTotal}
+          taxEnabled={taxEnabled}
+          taxRate={taxRate}
+          onOpenPaymentModal={openPaymentModal}
+          onQuickCheckoutAndPrint={handleQuickCashCheckoutAndPrint}
+          onClearCart={() => setCart([])}
+          onOpenDesignSelector={() => setIsDesignSelectorOpen(true)}
+          onOpenQuickCustomerModal={() => setIsQuickCustomerModalOpen(true)}
+          onOpenRecentSales={() => setShowRecentInvoicesModal(true)}
+          onStartPriceEdit={handleStartPriceEdit}
+          canUserEditPrice={canUserEditPrice()}
+          isOnlineState={isOnlineState}
+          pendingOfflineCount={pendingOfflineCount}
+          onManualOfflineSync={handleManualOfflineSync}
+          currentUser={currentUser}
+          completedSale={completedSale}
+          onOpenReceipt={() => setIsReceiptModalOpen(true)}
           orderNumber={recentSales.length + 1}
         />
       ) : (
@@ -1600,6 +1773,14 @@ export default function POS({ customers }: { customers: Customer[] }) {
               </option>
             ))}
           </select>
+          <button
+            type="button"
+            onClick={() => setIsQuickCustomerModalOpen(true)}
+            className="bg-gold/10 hover:bg-gold/20 text-gold border border-gold/30 p-1.5 px-2 rounded-xl font-bold text-xs transition-colors"
+            title="إضافة عميل جديد"
+          >
+            ➕
+          </button>
         </div>
 
         {/* QR / Barcode Scanner Modal */}
@@ -2268,6 +2449,102 @@ export default function POS({ customers }: { customers: Customer[] }) {
       )}
 
       {/* =========================================================
+          QUICK ADD PRODUCT MODAL
+          ========================================================= */}
+      {isQuickProductModalOpen && (
+        <div className="fixed inset-0 z-[10000] bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-fadeIn">
+          <div className="bg-card p-6 rounded-3xl w-full max-w-sm border border-border space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-border pb-3">
+              <h3 className="font-black text-base text-text-main flex items-center gap-2">
+                <span className="text-gold text-lg">➕</span>
+                <span>إضافة صنف جديد سريع للبيع</span>
+              </h3>
+              <button onClick={() => setIsQuickProductModalOpen(false)} className="text-text-dim hover:text-danger">
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateQuickProduct} className="space-y-3 text-xs">
+              <div>
+                <label className="block text-text-dim font-bold mb-1">اسم الصنف / المنتج: *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="مثال: علبة دواء بنادول اكسترا"
+                  className="w-full bg-card2 border border-border p-2.5 rounded-xl font-bold focus:outline-none focus:border-gold text-text-main"
+                  value={newProductName}
+                  onChange={e => setNewProductName(e.target.value)}
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="block text-text-dim font-bold mb-1">باركود الصنف (SKU):</label>
+                <input
+                  type="text"
+                  placeholder="اتركه فارغاً للتوليد التلقائي"
+                  className="w-full bg-card2 border border-border p-2.5 rounded-xl font-mono focus:outline-none focus:border-gold text-text-main"
+                  value={newProductSku}
+                  onChange={e => setNewProductSku(e.target.value)}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="block text-text-dim font-bold mb-1">سعر الشراء (التكلفة):</label>
+                  <input
+                    type="number"
+                    placeholder="0"
+                    className="w-full bg-card2 border border-border p-2.5 rounded-xl font-mono focus:outline-none focus:border-gold text-text-main"
+                    value={newProductCost}
+                    onChange={e => setNewProductCost(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-text-dim font-bold mb-1">سعر البيع الافتراضي:</label>
+                  <input
+                    type="number"
+                    placeholder="0"
+                    className="w-full bg-card2 border border-border p-2.5 rounded-xl font-mono focus:outline-none focus:border-gold text-text-main"
+                    value={newProductPrice}
+                    onChange={e => setNewProductPrice(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-text-dim font-bold mb-1">الكمية الابتدائية في المخزن:</label>
+                <input
+                  type="number"
+                  placeholder="10"
+                  className="w-full bg-card2 border border-border p-2.5 rounded-xl font-mono focus:outline-none focus:border-gold text-text-main"
+                  value={newProductQuantity}
+                  onChange={e => setNewProductQuantity(e.target.value)}
+                />
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  type="submit"
+                  disabled={isSavingProduct}
+                  className="flex-1 bg-gold hover:bg-gold2 text-white py-2.5 rounded-xl font-bold transition-all shadow-md active:scale-95 disabled:opacity-50"
+                >
+                  {isSavingProduct ? 'جاري الحفظ...' : 'حفظ وإضافة للسلة'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsQuickProductModalOpen(false)}
+                  className="bg-card2 border border-border text-text-dim hover:text-white px-3 py-2.5 rounded-xl font-bold"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================
           PRINT & INVOICE PREVIEW MODAL (@media print support)
           ========================================================= */}
       {isReceiptModalOpen && completedSale && (
@@ -2385,7 +2662,7 @@ export default function POS({ customers }: { customers: Customer[] }) {
                     <span>-{completedSale.discountType === 'percentage' ? `${completedSale.discountValue}%` : `${completedSale.discountValue} ج.م`}</span>
                   </div>
                 ) : null}
-                {completedSale.taxAmount ? (
+                {taxEnabled && completedSale.taxAmount && completedSale.taxAmount > 0 ? (
                   <div className="flex justify-between text-gray-700">
                     <span>ضريبة القيمة المضافة ({completedSale.taxRate}%):</span>
                     <span className="font-bold">+{completedSale.taxAmount} ج.م</span>
@@ -2550,6 +2827,12 @@ export default function POS({ customers }: { customers: Customer[] }) {
                 <span>-{completedSale.discountType === 'percentage' ? `${completedSale.discountValue}%` : `${completedSale.discountValue} ج`}</span>
               </div>
             ) : null}
+            {taxEnabled && completedSale.taxAmount && completedSale.taxAmount > 0 ? (
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span>ضريبة القيمة المضافة ({completedSale.taxRate}%):</span>
+                <span>+{completedSale.taxAmount} ج.م</span>
+              </div>
+            ) : null}
             <div style={{ display: 'flex', justifyContent: 'space-between', fontWeight: 'bold', fontSize: '13px', borderTop: '1px dashed #444', marginTop: '3px', paddingTop: '3px' }}>
               <span>الإجمالي النهائي:</span>
               <span>{completedSale.finalTotal} ج.م</span>
@@ -2588,7 +2871,20 @@ export default function POS({ customers }: { customers: Customer[] }) {
                 <History className="text-gold" size={18} />
                 <h3 className="font-black text-base text-text-main">سجل الفواتير الأخيرة وإعادة الطباعة</h3>
               </div>
-              <button onClick={() => setShowRecentInvoicesModal(false)} className="text-text-dim hover:text-danger"><X size={18} /></button>
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={() => {
+                    setShowRecentInvoicesModal(false);
+                    if (onNavigateHome) onNavigateHome();
+                  }}
+                  className="bg-gold/15 hover:bg-gold text-gold hover:text-white px-2.5 py-1 rounded-xl text-xs font-bold transition-all flex items-center gap-1 border border-gold/30"
+                  title="إغلاق السجل والذهاب للشاشة الرئيسية"
+                >
+                  <Home size={13} />
+                  <span>الرئيسية</span>
+                </button>
+                <button onClick={() => setShowRecentInvoicesModal(false)} className="text-text-dim hover:text-danger"><X size={18} /></button>
+              </div>
             </div>
 
             <div className="max-h-96 overflow-y-auto space-y-2 text-xs">
@@ -2607,16 +2903,27 @@ export default function POS({ customers }: { customers: Customer[] }) {
                       </p>
                     </div>
 
-                    <button
-                      onClick={() => {
-                        setShowRecentInvoicesModal(false);
-                        openInvoiceForPrint(sale);
-                      }}
-                      className="bg-card hover:bg-gold hover:text-white border border-border px-3 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1 shadow-sm"
-                    >
-                      <Printer size={13} />
-                      <span>معاينة وطباعة</span>
-                    </button>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => {
+                          setShowRecentInvoicesModal(false);
+                          openInvoiceForPrint(sale);
+                        }}
+                        className="bg-card hover:bg-gold hover:text-white border border-border px-2.5 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1 shadow-sm text-[11px]"
+                        title="معاينة وطباعة الفاتورة"
+                      >
+                        <Printer size={13} />
+                        <span>طباعة</span>
+                      </button>
+                      <button
+                        onClick={() => setPosSaleToDelete(sale)}
+                        className="bg-danger/10 hover:bg-danger text-danger hover:text-white border border-danger/30 px-2.5 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1 shadow-sm text-[11px]"
+                        title="حذف وإلغاء الفاتورة واسترجاع كمياتها للمخزن"
+                      >
+                        <Trash2 size={13} />
+                        <span>حذف</span>
+                      </button>
+                    </div>
                   </div>
                 ))
               )}
@@ -2628,6 +2935,104 @@ export default function POS({ customers }: { customers: Customer[] }) {
             >
               إغلاق
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* POS Delete Sale Confirmation Modal */}
+      {posSaleToDelete && (
+        <div className="fixed inset-0 z-[10000] bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-fadeIn">
+          <div className="bg-card p-6 rounded-3xl w-full max-w-md border border-red-500/40 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-danger/20 text-danger">
+                  <Trash2 size={20} />
+                </div>
+                <div>
+                  <h3 className="font-black text-base text-text-main">تأكيد حذف الفاتورة</h3>
+                  <p className="text-[11px] text-text-dim">إلغاء المعاملة واسترجاع المخزون</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setPosSaleToDelete(null)}
+                disabled={isDeletingPosSale}
+                className="text-text-dim hover:text-danger p-1 rounded-lg"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="bg-card2 p-4 rounded-2xl border border-border space-y-2 text-xs">
+              <div className="flex justify-between">
+                <span className="text-text-dim">رقم الفاتورة:</span>
+                <strong className="text-text-main font-mono">#{posSaleToDelete.invoiceNumber || posSaleToDelete.id.slice(-8)}</strong>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-dim">العميل:</span>
+                <strong className="text-text-main">{posSaleToDelete.customerName}</strong>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-dim">الإجمالي:</span>
+                <strong className="text-gold font-mono">{posSaleToDelete.finalTotal} ج.م</strong>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-dim">عدد الأصناف:</span>
+                <span className="text-green-400 font-bold">+{posSaleToDelete.items.length} أصناف تسترجع للمخزن</span>
+              </div>
+            </div>
+
+            <div className="bg-danger/10 border border-danger/30 p-3 rounded-2xl text-xs text-red-300">
+              ⚠️ سيتم حذف الفاتورة نهائياً وإرجاع جميع كميات الأصناف إلى رصيد المخزن فوراً.
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                disabled={isDeletingPosSale}
+                onClick={async () => {
+                  try {
+                    setIsDeletingPosSale(true);
+                    await deleteSale(posSaleToDelete.id, currentUser?.companyId);
+                    setRecentSales(prev => prev.filter(s => s.id !== posSaleToDelete.id));
+                    setSales(prev => prev.filter(s => s.id !== posSaleToDelete.id));
+                    const freshProds = await getProducts(currentUser?.companyId);
+                    if (freshProds) setProducts(freshProds);
+                    setToastType('success');
+                    setToastMessage(`تم حذف الفاتورة #${posSaleToDelete.invoiceNumber || posSaleToDelete.id.slice(-8)} بنجاح واسترجاع المخزون.`);
+                    playSuccessSound();
+                    setPosSaleToDelete(null);
+                  } catch (err: any) {
+                    console.error('POS sale delete error:', err);
+                    setToastType('warning');
+                    setToastMessage(`فشل الحذف: ${err?.message || 'خطأ غير معروف'}`);
+                    playWarningSound();
+                  } finally {
+                    setIsDeletingPosSale(false);
+                  }
+                }}
+                className="flex-1 bg-danger hover:bg-danger/90 text-white py-2.5 rounded-xl font-bold transition-all shadow-md active:scale-95 disabled:opacity-50 flex items-center justify-center gap-1.5 text-xs"
+              >
+                {isDeletingPosSale ? (
+                  <>
+                    <RotateCcw className="animate-spin" size={15} />
+                    <span>جاري الحذف...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={15} />
+                    <span>تأكيد الحذف وإرجاع المخزون</span>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingPosSale}
+                onClick={() => setPosSaleToDelete(null)}
+                className="bg-card2 border border-border text-text-dim hover:text-white px-4 py-2.5 rounded-xl font-bold text-xs"
+              >
+                إلغاء
+              </button>
+            </div>
           </div>
         </div>
       )}

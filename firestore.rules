@@ -1,7 +1,133 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function hasValidCompanyId() {
+      return incoming().companyId is string && incoming().companyId.size() > 0;
+    }
+
+    function isCompanyImmutable() {
+      return !('companyId' in existing()) || incoming().companyId == existing().companyId;
+    }
+
+    // Default Fallback - Deny all unhandled paths
     match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Companies
+    match /companies/{companyId} {
+      allow read: if true;
+      allow create, update: if incoming().name is string;
+      allow delete: if false;
+    }
+
+    // Branches
+    match /branches/{branchId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Memberships
+    match /memberships/{membershipId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Products
+    match /products/{productId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Sales
+    match /sales/{saleId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Customers
+    match /customers/{customerId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Suppliers
+    match /suppliers/{supplierId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Purchases
+    match /purchases/{purchaseId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Expenses
+    match /expenses/{expenseId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Categories
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Inventory Movements
+    match /inventoryMovements/{movementId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Cashier Sessions
+    match /cashierSessions/{sessionId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Users
+    match /users/{userId} {
+      allow read: if true;
+      allow create: if hasValidCompanyId();
+      allow update: if isCompanyImmutable();
+      allow delete: if false;
+    }
+
+    // Counters
+    match /counters/{counterId} {
       allow read, write: if true;
     }
   }

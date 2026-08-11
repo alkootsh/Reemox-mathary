@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ShoppingBag, Clock, CheckCircle, Coins, Download } from 'lucide-react';
+import { ShoppingBag, Clock, CheckCircle, Coins, Download, Home } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
@@ -9,7 +9,7 @@ const orders = [
   { id:'ORD-2024-1047', name:'سارة عبد الله', phone:'0121234567', date:'29 مايو 2026', items:1, status:'شحن', amount:'780' },
 ];
 
-export default function OrderManagement() {
+export default function OrderManagement({ onNavigateHome }: { onNavigateHome?: () => void }) {
   const [filter, setFilter] = useState('all');
 
   const exportToExcel = () => {
@@ -34,7 +34,16 @@ export default function OrderManagement() {
     <div className="p-4 sm:p-5 text-right space-y-6 pb-28" dir="rtl">
       <div className='flex justify-between items-center flex-wrap gap-2'>
         <h2 className="text-xl sm:text-2xl font-bold">إدارة الطلبات</h2>
-        <div className='flex gap-2'>
+        <div className='flex items-center gap-2 flex-wrap'>
+            {onNavigateHome && (
+                <button
+                    onClick={onNavigateHome}
+                    className="bg-gold/20 hover:bg-gold text-gold hover:text-white border border-gold/30 px-3.5 py-2 rounded-2xl font-bold text-xs flex items-center gap-1.5 shadow transition-all active:scale-95"
+                >
+                    <Home size={15} />
+                    <span>العودة للرئيسية</span>
+                </button>
+            )}
             <button onClick={exportToExcel} className='bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded-xl flex items-center gap-1 text-xs sm:text-sm font-bold shadow transition-all'><Download size={15}/> Excel</button>
             <button onClick={exportToPDF} className='bg-red-600 hover:bg-red-700 text-white px-3 py-2 rounded-xl flex items-center gap-1 text-xs sm:text-sm font-bold shadow transition-all'><Download size={15}/> PDF</button>
         </div>

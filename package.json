@@ -9,31 +9,36 @@
     "start": "node dist/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit",
-    "electron:start": "electron .",
-    "build:desktop": "vite build && electron-builder",
-    "cap:build": "vite build && npx cap sync"
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
+    "@types/pg": "^8.21.0",
     "@vitejs/plugin-react": "^5.0.4",
     "@zxing/library": "^0.21.3",
     "dotenv": "^17.2.3",
+    "drizzle-kit": "^0.31.10",
+    "drizzle-orm": "^0.45.2",
+    "esbuild": "^0.28.0",
     "express": "^4.21.2",
     "firebase": "^12.13.0",
+    "firebase-admin": "^14.2.0",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "node-cron": "^4.2.1",
     "nodemailer": "^8.0.9",
+    "pg": "^8.23.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
     "react-qr-scanner": "^1.0.0-alpha.11",
     "react-zxing": "^2.1.0",
     "recharts": "^3.8.1",
+    "tsx": "^4.21.0",
     "twilio": "^6.0.2",
+    "typescript": "~5.8.2",
     "vite": "^6.2.3",
     "xlsx": "^0.18.5"
   },
@@ -41,10 +46,6 @@
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
-    "esbuild": "^0.28.0",
-    "tailwindcss": "^4.1.14",
-    "tsx": "^4.21.0",
-    "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "tailwindcss": "^4.1.14"
   }
 }

@@ -3,6 +3,7 @@ import { Product, Category } from '@/src/types/types';
 import { recordInventoryAdjustment, recordBatchInventorySettlement } from '@/src/lib/firestoreService';
 import { logActivity } from '@/src/lib/activity';
 import { playSuccessSound } from '@/src/lib/sound';
+import { useTenant } from '../context/TenantContext';
 import { 
   ClipboardCheck, 
   Search, 
@@ -28,6 +29,7 @@ interface InventoryCountProps {
 }
 
 export default function InventoryCount({ products, setProducts, categories = [] }: InventoryCountProps) {
+  const { currentUser } = useTenant();
   // Physical count state: productId -> count string
   const [counts, setCounts] = useState<Record<string, string>>({});
   const [itemNotes, setItemNotes] = useState<Record<string, string>>({});
@@ -177,16 +179,24 @@ export default function InventoryCount({ products, setProducts, categories = [] 
       return;
     }
 
+    const reason = prompt(`أدخل سبب تسوية جرد الصنف "${item.product.name}" (الدفترية: ${item.bookQty} -> الفعلية: ${item.physicalQty}):`, item.note || 'تسوية جرد دوري');
+    if (reason === null) return; // cancelled
+
     try {
       await recordInventoryAdjustment(
         item.product,
         item.physicalQty,
-        `تسوية جرد فردية: ${sessionTitle} (${item.note || 'تسوية رصيد'})`
+        reason
       );
 
       // Update state
       setProducts(prev => prev.map(p => p.id === productId ? { ...p, quantity: item.physicalQty } : p));
-      logActivity(`تمت تسوية جرد الصنف ${item.product.name} من ${item.bookQty} إلى ${item.physicalQty}`);
+      
+      const empName = currentUser?.name || currentUser?.username || 'المسؤول';
+      const timeStr = new Date().toLocaleString('ar-EG');
+      const logText = `[تسوية جرد فردية] التاريخ: ${timeStr} | المسؤول: ${empName} | الصنف: ${item.product.name} | الكمية القديمة: ${item.bookQty} -> الجديدة: ${item.physicalQty} | السبب: ${reason || 'بدون سبب'}`;
+      logActivity(logText);
+
       playSuccessSound();
       alert(`✅ تمت تسوية رصيد ${item.product.name} بنجاح إلى (${item.physicalQty}).`);
     } catch (err: any) {
@@ -202,7 +212,10 @@ export default function InventoryCount({ products, setProducts, categories = [] 
       return;
     }
 
-    const confirmMsg = `تأكيد اعتماد التسوية المخزنية الشاملة:\n- عدد الأصناف المراد تسويتها: ${itemsToSettle.length}\n- إجمالي قيمة العجز: ${summary.totalDeficitValue.toLocaleString('ar-EG')} ج.م\n- إجمالي قيمة الزيادة: ${summary.totalSurplusValue.toLocaleString('ar-EG')} ج.م\n\nهل تريد تحديث أرصدة المخزن وتسجيل حركات التسوية الآن؟`;
+    const batchReason = prompt('أدخل سبب أو ملاحظة تسوية الجرد الشاملة:', sessionTitle);
+    if (batchReason === null) return; // cancelled
+
+    const confirmMsg = `تأكيد اعتماد التسوية المخزنية الشاملة:\n- عدد الأصناف المراد تسويتها: ${itemsToSettle.length}\n- إجمالي قيمة العجز: ${summary.totalDeficitValue.toLocaleString('ar-EG')} ج.م\n- إجمالي قيمة الزيادة: ${summary.totalSurplusValue.toLocaleString('ar-EG')} ج.م\n- السبب: ${batchReason}\n\nهل تريد تحديث أرصدة المخزن وتسجيل حركات التسوية الآن؟`;
     if (!window.confirm(confirmMsg)) return;
 
     try {
@@ -211,7 +224,7 @@ export default function InventoryCount({ products, setProducts, categories = [] 
         itemsToSettle.map(i => ({
           product: i.product,
           newQuantity: i.physicalQty,
-          notes: i.note
+          notes: batchReason
         })),
         sessionTitle
       );
@@ -225,7 +238,11 @@ export default function InventoryCount({ products, setProducts, categories = [] 
         return p;
       }));
 
-      logActivity(`تم اعتماد تسوية جرد مخزني شاملة لعدد ${res.settledCount} صنف بقيمة فارق ${res.totalDiffValue} ج.م`);
+      const empName = currentUser?.name || currentUser?.username || 'المسؤول';
+      const timeStr = new Date().toLocaleString('ar-EG');
+      const logText = `[تسوية جرد شاملة] التاريخ: ${timeStr} | المسؤول: ${empName} | العنوان: ${sessionTitle} | عدد الأصناف: ${res.settledCount} | السبب: ${batchReason}`;
+      logActivity(logText);
+
       playSuccessSound();
       alert(`🎉 تم بنجاح اعتماد تسوية الجرد وتحديث أرصدة ${res.settledCount} صنف في قاعدة البيانات!`);
       setCounts({});

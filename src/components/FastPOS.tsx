@@ -36,10 +36,9 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import { Product, Sale, Customer, AppUser } from '../types/types';
-import { getUsers, processSale, saveCustomer, getCustomers } from '../lib/firestoreService';
+import { getUsers, processSale, saveCustomer, getCustomers, getProducts } from '../lib/firestoreService';
+import { triggerSaleNotification } from '../lib/notifications';
 import { verifyDeveloperPassword } from '../lib/license';
-import { db } from '@/src/lib/firebase';
-import { collection, getDocs } from 'firebase/firestore';
 import { playSuccessSound, playWarningSound } from '../lib/sound';
 
 interface FastProduct extends Product {
@@ -126,6 +125,22 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
     return localStorage.getItem('requireSupervisorPinForPriceEdit') !== 'false';
   });
 
+  // Re-evaluate cart prices when customer changes
+  useEffect(() => {
+    if (cart.length > 0) {
+      setCart(prev => prev.map(item => {
+        // Skip items that have custom cashier-entered prices
+        if (item.isCustomPrice || !item.product) return item;
+        
+        const newPrice = getApplicablePrice(item.product);
+        if (newPrice !== item.price) {
+          return { ...item, price: newPrice, originalPrice: newPrice };
+        }
+        return item;
+      }));
+    }
+  }, [selectedCustomerId]);
+
   // Supervisor PIN Modal
   const [isSupervisorModalOpen, setIsSupervisorModalOpen] = useState(false);
   const [supervisorPinInput, setSupervisorPinInput] = useState('');
@@ -158,13 +173,11 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
   useEffect(() => {
     const fetchDBProducts = async () => {
       try {
-        const snap = await getDocs(collection(db, 'products'));
-        if (!snap.empty) {
-          const list: FastProduct[] = snap.docs.map(d => {
-            const data = d.data() as Product;
+        const productsData = await getProducts();
+        if (productsData && productsData.length > 0) {
+          const list: FastProduct[] = productsData.map(data => {
             return {
               ...data,
-              id: d.id,
               emoji: data.name.includes('قهوة') || data.name.includes('كافيه') ? '☕' :
                      data.name.includes('برجر') ? '🍔' :
                      data.name.includes('بيتزا') ? '🍕' :
@@ -290,6 +303,14 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
 
     const item = cart.find(it => it.product?.id === productId);
     const itemCost = item?.product?.cost ?? 0;
+    const minPrice = item?.product?.minPrice ?? 0;
+
+    if (minPrice > 0 && num < minPrice && currentUser?.role !== 'admin' && !supervisorOverrideActive) {
+      playWarningSound();
+      alert(`⚠️ تنبيه: لا يمكن البيع بأقل من أقل سعر بيع محدد (${minPrice} ج.م)`);
+      return;
+    }
+
     if (preventSellBelowCost && itemCost > 0 && num < itemCost && currentUser?.role !== 'admin' && !supervisorOverrideActive) {
       playWarningSound();
       alert(`⚠️ تنبيه: لا يمكن البيع بأقل من سعر التكلفة (${itemCost} ج.م) وفقاً لسياسة الإدارة`);
@@ -401,6 +422,23 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [displayProducts, cart, isCheckoutModalOpen]);
 
+  // Helper to determine price based on customer type and cashier type
+  const getApplicablePrice = (product: FastProduct) => {
+    let p = product.price;
+    const cust = customerList.find(c => c.id === selectedCustomerId);
+    const cType = cust?.customerType;
+    const kType = currentUser?.cashierType;
+
+    if (cType === 'wholesale' && product.wholesalePrice && product.wholesalePrice > 0) {
+      p = product.wholesalePrice;
+    } else if (cType === 'half_wholesale' && product.halfWholesalePrice && product.halfWholesalePrice > 0) {
+      p = product.halfWholesalePrice;
+    } else if (kType === 'wholesale' && product.wholesalePrice && product.wholesalePrice > 0 && (!cType || cType === 'retail')) {
+      p = product.wholesalePrice;
+    }
+    return p;
+  };
+
   // Add item to cart
   const addToCart = (product: FastProduct) => {
     setAnimatedProductId(product.id);
@@ -414,11 +452,12 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
         next[idx] = { ...next[idx], quantity: next[idx].quantity + 1 };
         return next;
       }
+      const applicablePrice = getApplicablePrice(product);
       return [...prev, { 
         product, 
         quantity: 1, 
-        price: product.price, 
-        originalPrice: product.price, 
+        price: applicablePrice, 
+        originalPrice: applicablePrice, 
         isCustomPrice: false 
       }];
     });
@@ -535,10 +574,21 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
       .map((item, idx) => `${idx + 1}. *${item.name}* × ${item.quantity} = ${(item.price * item.quantity).toFixed(2)} ج.م`)
       .join('\n');
 
+    const totalPaid = (sale.payments || [])
+      .filter(p => (p.method as string).toUpperCase() !== 'CREDIT')
+      .reduce((sum, p) => sum + (p.amount || 0), 0) || sale.paidAmount || 0;
+
+    const remainingDebt = (sale.payments || [])
+      .filter(p => (p.method as string).toUpperCase() === 'CREDIT')
+      .reduce((sum, p) => sum + (p.amount || 0), 0) || sale.remainingAmount || (sale.paymentMethod === 'credit' ? ((sale.finalTotal || sale.total) - totalPaid) : 0);
+
+    const isPartial = sale.status === 'partially-paid' || (totalPaid > 0 && remainingDebt > 0);
+    const isPaid = sale.status === 'paid' || (remainingDebt <= 0 && sale.paymentMethod !== 'credit');
+
     const paymentLabel = 
-      sale.paymentMethod === 'cash' ? '💵 نقداً (كاش)' :
-      sale.paymentMethod === 'card' ? '💳 بطاقة / فيزا' :
-      sale.paymentMethod === 'wallet' ? '📱 محفظة ذكية' : '⚠️ بيع آجل (على الحساب)';
+      isPaid ? (sale.paymentMethod === 'card' ? '💳 بطاقة / فيزا' : sale.paymentMethod === 'wallet' ? '📱 محفظة ذكية' : '💵 نقداً (كاش)') :
+      isPartial ? '⏳ بيع آجل جزئياً (مدفوع مقدم ومتبقي آجل)' :
+      '🔴 بيع آجل كلي (على الحساب)';
 
     return `🧾 *فاتورة مبيعات إلكترونية*
 🏪 *نظام MARO ERP المحاسبي*
@@ -552,9 +602,9 @@ export default function FastPOS({ sales, customers = [] }: { sales?: Sale[]; cus
 ${itemsText}
 ━━━━━━━━━━━━━━━━━
 💵 *المجموع الفرعي:* ${(sale.subtotal ?? sale.total).toFixed(2)} ج.م
-${sale.discount && sale.discount > 0 ? `🎁 *الخصم:* -${sale.discount.toFixed(2)} ج.م\n` : ''}${sale.tax && sale.tax > 0 ? `🏛️ *ضريبة القيمة المضافة (14%):* +${sale.tax.toFixed(2)} ج.م\n` : ''}💰 *الصافي الإجمالي:* ${(sale.finalTotal || sale.total).toFixed(2)} ج.م
+${taxEnabled && sale.tax && sale.tax > 0 ? `🏛️ *ضريبة القيمة المضافة (${taxRate}%):* +${sale.tax.toFixed(2)} ج.م\n` : ''}💰 *الصافي الإجمالي:* ${(sale.finalTotal || sale.total).toFixed(2)} ج.م
 💳 *طريقة السداد:* ${paymentLabel}
-${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية بحسابكم:* ${(sale.remainingAmount || sale.finalTotal || sale.total).toFixed(2)} ج.م\n` : ''}${sale.paymentMethod === 'cash' && (sale.changeAmount || 0) > 0 ? `💵 *الباقي للعميل:* ${sale.changeAmount?.toFixed(2)} ج.م\n` : ''}━━━━━━━━━━━━━━━━━
+${isPartial ? `💵 *المبلغ المدفوع (مقدم/كاش):* ${totalPaid.toFixed(2)} ج.م\n🔴 *المتبقي الآجل على الحساب:* ${remainingDebt.toFixed(2)} ج.م\n` : ''}${!isPaid && !isPartial ? `🔴 *المديونية الآجلة بحسابكم:* ${(remainingDebt || sale.finalTotal || sale.total).toFixed(2)} ج.م\n` : ''}${isPaid && (sale.changeAmount || 0) > 0 ? `💵 *الباقي للعميل:* ${sale.changeAmount?.toFixed(2)} ج.م\n` : ''}━━━━━━━━━━━━━━━━━
 ✨ *شكراً لتعاملكم معنا! نتطلع لخدمتكم دائماً* 🙏`;
   };
 
@@ -696,6 +746,7 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
       }
 
       setLastCompletedSale(dbSavedSale);
+      triggerSaleNotification(dbSavedSale).catch(err => console.warn('Sale notification failed:', err));
       setWhatsAppPhoneInput(selectedCust?.phone || '');
       setIsCheckoutModalOpen(false);
       setShowSuccessModal(true);
@@ -796,7 +847,7 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
 
             <div class="flex-between"><span>المجموع الفرعي:</span><span>${saleToPrint.subtotal.toFixed(2)} ج.م</span></div>
             ${saleToPrint.discount > 0 ? `<div class="flex-between"><span>الخصم:</span><span>-${saleToPrint.discount.toFixed(2)} ج.م</span></div>` : ''}
-            ${saleToPrint.tax > 0 ? `<div class="flex-between"><span>ضريبة القيمة المضافة:</span><span>+${saleToPrint.tax.toFixed(2)} ج.م</span></div>` : ''}
+            ${taxEnabled && saleToPrint.tax && saleToPrint.tax > 0 ? `<div class="flex-between"><span>ضريبة القيمة المضافة:</span><span>+${saleToPrint.tax.toFixed(2)} ج.م</span></div>` : ''}
             
             <div class="double-divider"></div>
             
@@ -1176,7 +1227,7 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
           <div className="flex items-center gap-4">
             <div className="text-xs text-slate-400 space-y-0.5">
               <div>المجموع: <span className="font-mono text-slate-200 font-bold">{subtotal} ج.م</span></div>
-              {taxEnabled && <div>الضريبة ({taxRate}%): <span className="font-mono text-slate-200 font-bold">{tax} ج.م</span></div>}
+              {taxEnabled && tax > 0 && <div>الضريبة ({taxRate}%): <span className="font-mono text-slate-200 font-bold">{tax} ج.م</span></div>}
             </div>
           </div>
 
@@ -1231,7 +1282,7 @@ ${sale.paymentMethod === 'credit' ? `🔴 *المديونية المتبقية �
                 <div className="text-end text-xs text-slate-400 space-y-0.5">
                   <p>المجموع: {subtotal} ج</p>
                   {discountAmount > 0 && <p className="text-emerald-400">خصم: -{discountAmount} ج</p>}
-                  {tax > 0 && <p>ضريبة ({taxRate}%): +{tax} ج</p>}
+                  {taxEnabled && tax > 0 && <p>ضريبة ({taxRate}%): +{tax} ج</p>}
                 </div>
               </div>
 

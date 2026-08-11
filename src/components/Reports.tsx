@@ -1,5 +1,18 @@
-import React, { useState, useMemo } from 'react';
-import { Purchase, Sale, Product, Expense, Customer, Supplier, BusinessType } from '../types/types';
+import React, { useState, useMemo, useEffect } from 'react';
+import { Purchase, Sale, Product, Expense, Customer, Supplier, BusinessType, Branch } from '../types/types';
+import { deleteSale, deletePurchase, getUserPreferences } from '../lib/firestoreService';
+import { useTenant } from '../context/TenantContext';
+import ColumnManagerModal from './ColumnManagerModal';
+import Toast from './Toast';
+import { playSuccessSound, playWarningSound } from '../lib/sound';
+import { 
+  SALES_COLUMNS, 
+  SALES_DEFAULT_VISIBLE,
+  PURCHASES_COLUMNS,
+  PURCHASES_DEFAULT_VISIBLE,
+  SHIFTS_COLUMNS,
+  SHIFTS_DEFAULT_VISIBLE
+} from '../lib/columns';
 import { 
   ResponsiveContainer, 
   AreaChart, 
@@ -30,7 +43,17 @@ import {
   ArrowUpRight, 
   ArrowDownRight,
   ShieldCheck,
-  CheckCircle2
+  CheckCircle2,
+  Trash2,
+  AlertTriangle,
+  X,
+  RotateCcw,
+  Eye,
+  PackageCheck,
+  Truck,
+  Receipt,
+  Search,
+  Package
 } from 'lucide-react';
 import FinancialRatiosCard, { FinancialRatiosData } from './reports/FinancialRatiosCard';
 import AbcAnalysisCard from './reports/AbcAnalysisCard';
@@ -38,6 +61,7 @@ import PeakHoursChart from './reports/PeakHoursChart';
 import CategoryBreakdown from './reports/CategoryBreakdown';
 import CashFlowCard, { CashFlowData } from './reports/CashFlowCard';
 import IncomeStatementModal from './reports/IncomeStatementModal';
+import SalesCharts from './reports/SalesCharts';
 
 interface Props {
   purchases?: Purchase[];
@@ -46,6 +70,11 @@ interface Props {
   expenses?: Expense[];
   customers?: Customer[];
   suppliers?: Supplier[];
+  branches?: Branch[];
+  setSales?: React.Dispatch<React.SetStateAction<Sale[]>>;
+  onSaleDeleted?: (saleId: string) => void;
+  setPurchases?: React.Dispatch<React.SetStateAction<Purchase[]>>;
+  onPurchaseDeleted?: (purchaseId: string) => void;
 }
 
 export type ReportTab = 
@@ -56,12 +85,14 @@ export type ReportTab =
   | 'categories' 
   | 'cashflow' 
   | 'sales' 
+  | 'purchases'
   | 'products' 
   | 'customers' 
   | 'suppliers' 
   | 'expenses' 
   | 'inventory' 
-  | 'tax';
+  | 'tax'
+  | 'advanced';
 
 type DatePreset = 'all' | 'today' | 'yesterday' | 'week' | 'month' | 'lastMonth' | 'custom';
 
@@ -73,8 +104,93 @@ export default function Reports({
   products = [],
   expenses = [],
   customers = [],
-  suppliers = []
+  suppliers = [],
+  branches = [],
+  setSales,
+  onSaleDeleted,
+  setPurchases,
+  onPurchaseDeleted
 }: Props) {
+  const { companyId } = useTenant();
+  const [localSales, setLocalSales] = useState<Sale[]>(sales || []);
+  const [saleToDelete, setSaleToDelete] = useState<Sale | null>(null);
+  const [isDeletingSale, setIsDeletingSale] = useState(false);
+
+  const [localPurchases, setLocalPurchases] = useState<Purchase[]>(purchases || []);
+  const [purchaseToDelete, setPurchaseToDelete] = useState<Purchase | null>(null);
+  const [isDeletingPurchase, setIsDeletingPurchase] = useState(false);
+  const [viewingPurchase, setViewingPurchase] = useState<Purchase | null>(null);
+
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'warning' | 'error' } | null>(null);
+
+  useEffect(() => {
+    setLocalSales(sales || []);
+  }, [sales]);
+
+  useEffect(() => {
+    setLocalPurchases(purchases || []);
+  }, [purchases]);
+
+  const confirmDeleteSale = async () => {
+    if (!saleToDelete) return;
+    try {
+      setIsDeletingSale(true);
+      await deleteSale(saleToDelete.id, companyId);
+      setLocalSales(prev => prev.filter(s => s.id !== saleToDelete.id));
+      if (setSales) {
+        setSales(prev => prev.filter(s => s.id !== saleToDelete.id));
+      }
+      if (onSaleDeleted) {
+        onSaleDeleted(saleToDelete.id);
+      }
+      setToast({ 
+        message: `تم حذف الفاتورة رقم #${saleToDelete.invoiceNumber || saleToDelete.id.slice(-8)} بنجاح وإرجاع كافة الكميات للمخزن.`, 
+        type: 'success' 
+      });
+      playSuccessSound();
+      setSaleToDelete(null);
+    } catch (err: any) {
+      console.error('Failed to delete sale:', err);
+      setToast({ 
+        message: `فشل حذف الفاتورة: ${err?.message || 'خطأ أثناء تنفيذ العملية'}`, 
+        type: 'error' 
+      });
+      playWarningSound();
+    } finally {
+      setIsDeletingSale(false);
+    }
+  };
+
+  const confirmDeletePurchase = async () => {
+    if (!purchaseToDelete) return;
+    try {
+      setIsDeletingPurchase(true);
+      await deletePurchase(purchaseToDelete.id, companyId);
+      setLocalPurchases(prev => prev.filter(p => p.id !== purchaseToDelete.id));
+      if (setPurchases) {
+        setPurchases(prev => prev.filter(p => p.id !== purchaseToDelete.id));
+      }
+      if (onPurchaseDeleted) {
+        onPurchaseDeleted(purchaseToDelete.id);
+      }
+      setToast({ 
+        message: `تم حذف فاتورة المشتريات رقم #${purchaseToDelete.purchaseNumber || purchaseToDelete.invoiceNumber || purchaseToDelete.id.slice(-8)} بنجاح، وتعديل كميات المخزن ورصيد المورد.`, 
+        type: 'success' 
+      });
+      playSuccessSound();
+      setPurchaseToDelete(null);
+    } catch (err: any) {
+      console.error('Failed to delete purchase:', err);
+      setToast({ 
+        message: `فشل حذف فاتورة المشتريات: ${err?.message || 'خطأ أثناء تنفيذ العملية'}`, 
+        type: 'error' 
+      });
+      playWarningSound();
+    } finally {
+      setIsDeletingPurchase(false);
+    }
+  };
+
   const [activeTab, setActiveTab] = useState<ReportTab>('overview');
   const [datePreset, setDatePreset] = useState<DatePreset>('all');
   const [startDate, setStartDate] = useState<string>('');
@@ -83,6 +199,59 @@ export default function Reports({
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<string>('all');
   const [isIncomeStatementOpen, setIsIncomeStatementOpen] = useState<boolean>(false);
 
+  // Advanced Filters State
+  const [selectedBranchId, setSelectedBranchId] = useState<string>('all');
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string>('all');
+  const [selectedCashierName, setSelectedCashierName] = useState<string>('all');
+  const [minInvoiceValue, setMinInvoiceValue] = useState<string>('');
+  const [maxInvoiceValue, setMaxInvoiceValue] = useState<string>('');
+  const [selectedCustomerSupplierId, setSelectedCustomerSupplierId] = useState<string>('all');
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState<boolean>(false);
+
+  // Column Customization State for Report Tables (Sales, Purchases & Shifts)
+  const currentUserStr = localStorage.getItem('currentUser');
+  const userObj = currentUserStr ? JSON.parse(currentUserStr) : null;
+  const userEmail = userObj?.email || userObj?.username || 'admin';
+
+  const [salesVisibleKeys, setSalesVisibleKeys] = useState<string[]>(SALES_DEFAULT_VISIBLE);
+  const [salesOrderedKeys, setSalesOrderedKeys] = useState<string[]>(() => SALES_COLUMNS.map(c => c.key));
+  const [showSalesColModal, setShowSalesColModal] = useState<boolean>(false);
+
+  const [purchasesVisibleKeys, setPurchasesVisibleKeys] = useState<string[]>(PURCHASES_DEFAULT_VISIBLE);
+  const [purchasesOrderedKeys, setPurchasesOrderedKeys] = useState<string[]>(() => PURCHASES_COLUMNS.map(c => c.key));
+  const [showPurchasesColModal, setShowPurchasesColModal] = useState<boolean>(false);
+
+  const [shiftsVisibleKeys, setShiftsVisibleKeys] = useState<string[]>(SHIFTS_DEFAULT_VISIBLE);
+  const [shiftsOrderedKeys, setShiftsOrderedKeys] = useState<string[]>(() => SHIFTS_COLUMNS.map(c => c.key));
+  const [showShiftsColModal, setShowShiftsColModal] = useState<boolean>(false);
+
+  useEffect(() => {
+    async function fetchPrefs() {
+      try {
+        const salesPrefs = await getUserPreferences(userEmail, 'sales');
+        if (salesPrefs && salesPrefs.visible && salesPrefs.order) {
+          setSalesVisibleKeys(salesPrefs.visible);
+          setSalesOrderedKeys(salesPrefs.order);
+        }
+
+        const purchPrefs = await getUserPreferences(userEmail, 'purchases');
+        if (purchPrefs && purchPrefs.visible && purchPrefs.order) {
+          setPurchasesVisibleKeys(purchPrefs.visible);
+          setPurchasesOrderedKeys(purchPrefs.order);
+        }
+        
+        const shiftsPrefs = await getUserPreferences(userEmail, 'shifts');
+        if (shiftsPrefs && shiftsPrefs.visible && shiftsPrefs.order) {
+          setShiftsVisibleKeys(shiftsPrefs.visible);
+          setShiftsOrderedKeys(shiftsPrefs.order);
+        }
+      } catch (err) {
+        console.warn("Failed to fetch column preferences on mount", err);
+      }
+    }
+    fetchPrefs();
+  }, [userEmail]);
+
   // Fast Product Lookup Map for Cost Calculation
   const productsMap = useMemo(() => {
     const map = new Map<string, Product>();
@@ -90,6 +259,24 @@ export default function Reports({
       if (p && p.id) map.set(p.id, p);
     });
     return map;
+  }, [products]);
+
+  // Derived unique cashier lists from sales
+  const uniqueCashiers = useMemo(() => {
+    const names = new Set<string>();
+    (localSales || []).forEach(s => {
+      if (s && s.cashierName) names.add(s.cashierName);
+    });
+    return Array.from(names);
+  }, [localSales]);
+
+  // Derived unique category lists from products
+  const uniqueCategories = useMemo(() => {
+    const cats = new Set<string>();
+    (products || []).forEach(p => {
+      if (p && p.category) cats.add(p.category);
+    });
+    return Array.from(cats);
   }, [products]);
 
   // Compute Active Date Range
@@ -144,14 +331,64 @@ export default function Reports({
     return true;
   };
 
-  // Filtered Datasets
+  // Filtered Datasets with advanced criteria
   const filteredSales = useMemo(() => {
-    return (sales || []).filter(s => {
+    return (localSales || []).filter(s => {
       if (!s) return false;
       if (!isDateInRange(s.date)) return false;
-      if (selectedPaymentMethod !== 'all' && (s.paymentMethod || 'cash') !== selectedPaymentMethod) {
+      
+      // Payment Method
+      if (selectedPaymentMethod !== 'all') {
+        const rawMethod = (s.paymentMethod || (s.payments && s.payments[0]?.method) || 'cash').toLowerCase();
+        let normalized = rawMethod;
+        if (rawMethod.includes('cash') || !rawMethod) normalized = 'cash';
+        else if (rawMethod.includes('credit') || rawMethod.includes('deferred') || rawMethod.includes('unpaid')) normalized = 'credit';
+        else if (rawMethod.includes('card') || rawMethod.includes('visa')) normalized = 'card';
+        else if (rawMethod.includes('wallet')) normalized = 'wallet';
+
+        if (normalized !== selectedPaymentMethod.toLowerCase()) {
+          return false;
+        }
+      }
+
+      // Branch
+      if (selectedBranchId !== 'all' && s.branchId !== selectedBranchId) {
         return false;
       }
+
+      // Cashier / User
+      if (selectedCashierName !== 'all' && s.cashierName !== selectedCashierName) {
+        return false;
+      }
+
+      // Customer
+      if (selectedCustomerSupplierId !== 'all') {
+        const matchesId = s.customerId === selectedCustomerSupplierId;
+        const matchesName = s.customerName && s.customerName.toLowerCase().includes(selectedCustomerSupplierId.toLowerCase());
+        if (!matchesId && !matchesName) {
+          return false;
+        }
+      }
+
+      // Category filter (if any item in sale belongs to this category)
+      if (selectedCategoryId !== 'all') {
+        const hasItemWithCat = s.items?.some(item => {
+          const prod = productsMap.get(item.productId);
+          return prod?.category === selectedCategoryId;
+        });
+        if (!hasItemWithCat) return false;
+      }
+
+      // Min & Max total value
+      const sTotal = Number(s.finalTotal || s.total || 0);
+      if (minInvoiceValue && sTotal < parseFloat(minInvoiceValue)) {
+        return false;
+      }
+      if (maxInvoiceValue && sTotal > parseFloat(maxInvoiceValue)) {
+        return false;
+      }
+
+      // Text Search Term
       if (searchTerm) {
         const term = searchTerm.toLowerCase();
         const cust = (s.customerName || '').toLowerCase();
@@ -160,15 +397,84 @@ export default function Reports({
       }
       return true;
     });
-  }, [sales, dateRange, selectedPaymentMethod, searchTerm]);
+  }, [sales, dateRange, selectedPaymentMethod, searchTerm, selectedBranchId, selectedCategoryId, selectedCashierName, selectedCustomerSupplierId, minInvoiceValue, maxInvoiceValue, productsMap]);
 
   const filteredPurchases = useMemo(() => {
-    return (purchases || []).filter(p => p && isDateInRange(p.date));
-  }, [purchases, dateRange]);
+    return (localPurchases || []).filter(p => {
+      if (!p) return false;
+      if (!isDateInRange(p.date)) return false;
+
+      // Payment Method
+      if (selectedPaymentMethod !== 'all') {
+        const pMethod = (p.paymentMethod || 'cash').toLowerCase();
+        if (selectedPaymentMethod === 'cash' && pMethod !== 'cash') return false;
+        if (selectedPaymentMethod === 'credit' && pMethod !== 'deferred-full' && pMethod !== 'deferred-partial' && pMethod !== 'credit') return false;
+        if (selectedPaymentMethod === 'deferred-full' && pMethod !== 'deferred-full') return false;
+        if (selectedPaymentMethod === 'deferred-partial' && pMethod !== 'deferred-partial') return false;
+      }
+
+      // Branch
+      if (selectedBranchId !== 'all' && p.branchId !== selectedBranchId) {
+        return false;
+      }
+
+      // Supplier
+      if (selectedCustomerSupplierId !== 'all') {
+        const matchesId = p.supplierId === selectedCustomerSupplierId;
+        const matchesName = p.supplierName && p.supplierName.toLowerCase().includes(selectedCustomerSupplierId.toLowerCase());
+        if (!matchesId && !matchesName) {
+          return false;
+        }
+      }
+
+      // Min & Max total value
+      const pTotal = Number(p.total || 0);
+      if (minInvoiceValue && pTotal < parseFloat(minInvoiceValue)) {
+        return false;
+      }
+      if (maxInvoiceValue && pTotal > parseFloat(maxInvoiceValue)) {
+        return false;
+      }
+
+      // Text Search Term
+      if (searchTerm) {
+        const term = searchTerm.toLowerCase();
+        const supp = (p.supplierName || '').toLowerCase();
+        const invNum = (p.invoiceNumber || '').toLowerCase();
+        const pNum = (p.purchaseNumber || p.id || '').toLowerCase();
+        const notes = (p.notes || '').toLowerCase();
+        const hasItemMatch = Array.isArray(p.items) && p.items.some(i => (i.productName || '').toLowerCase().includes(term));
+        if (!supp.includes(term) && !invNum.includes(term) && !pNum.includes(term) && !notes.includes(term) && !hasItemMatch) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [localPurchases, dateRange, selectedPaymentMethod, selectedBranchId, selectedCustomerSupplierId, minInvoiceValue, maxInvoiceValue, searchTerm]);
 
   const filteredExpenses = useMemo(() => {
-    return (expenses || []).filter(e => e && isDateInRange(e.date));
-  }, [expenses, dateRange]);
+    return (expenses || []).filter(e => {
+      if (!e) return false;
+      if (!isDateInRange(e.date)) return false;
+
+      // Branch
+      if (selectedBranchId !== 'all' && e.branchId !== selectedBranchId) {
+        return false;
+      }
+
+      // Min & Max total value
+      const eTotal = Number(e.amount || 0);
+      if (minInvoiceValue && eTotal < parseFloat(minInvoiceValue)) {
+        return false;
+      }
+      if (maxInvoiceValue && eTotal > parseFloat(maxInvoiceValue)) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [expenses, dateRange, selectedBranchId, minInvoiceValue, maxInvoiceValue]);
 
   // Helper to calculate total cost of an item safely
   const getItemCost = (item: any) => {
@@ -396,6 +702,95 @@ export default function Reports({
     ].filter(item => item.value > 0);
   }, [financialSummary]);
 
+  // Purchases Executive Summary Metrics
+  const purchasesSummary = useMemo(() => {
+    let totalPurchases = 0;
+    let totalPaid = 0;
+    let totalRemaining = 0;
+    let totalItemsCount = 0;
+
+    filteredPurchases.forEach(p => {
+      const tot = Number(p.total || 0);
+      const pd = Number(p.paidAmount || (p.paymentMethod === 'cash' ? tot : 0));
+      const rem = Math.max(0, tot - pd);
+      const itemsQty = Array.isArray(p.items) ? p.items.reduce((s, i) => s + (Number(i.quantity) || 0), 0) : 0;
+
+      totalPurchases += tot;
+      totalPaid += pd;
+      totalRemaining += rem;
+      totalItemsCount += itemsQty;
+    });
+
+    return {
+      totalPurchases: Math.round(totalPurchases * 100) / 100,
+      totalPaid: Math.round(totalPaid * 100) / 100,
+      totalRemaining: Math.round(totalRemaining * 100) / 100,
+      invoicesCount: filteredPurchases.length,
+      totalItemsCount,
+      avgInvoiceValue: filteredPurchases.length > 0 ? Math.round(totalPurchases / filteredPurchases.length) : 0
+    };
+  }, [filteredPurchases]);
+
+  // Purchases Trend Chart Data (Grouped by Date)
+  const purchasesChartData = useMemo(() => {
+    const dateMap = new Map<string, { date: string; total: number; paid: number; remaining: number; count: number }>();
+
+    filteredPurchases.forEach(p => {
+      const d = (p.date || '').split('T')[0] || 'غير محدد';
+      const pTotal = Number(p.total || 0);
+      const pPaid = Number(p.paidAmount || (p.paymentMethod === 'cash' ? pTotal : 0));
+      const pRemaining = Math.max(0, pTotal - pPaid);
+
+      if (dateMap.has(d)) {
+        const row = dateMap.get(d)!;
+        row.total += pTotal;
+        row.paid += pPaid;
+        row.remaining += pRemaining;
+        row.count += 1;
+      } else {
+        dateMap.set(d, {
+          date: d,
+          total: pTotal,
+          paid: pPaid,
+          remaining: pRemaining,
+          count: 1
+        });
+      }
+    });
+
+    const result = Array.from(dateMap.values()).sort((a, b) => a.date.localeCompare(b.date));
+    if (result.length === 0) {
+      return [{ date: 'اليوم', total: 0, paid: 0, remaining: 0, count: 0 }];
+    }
+    return result;
+  }, [filteredPurchases]);
+
+  // Top Supplier purchases breakdown
+  const supplierPurchasesBreakdown = useMemo(() => {
+    const suppMap = new Map<string, { id: string; name: string; total: number; invoicesCount: number }>();
+
+    filteredPurchases.forEach(p => {
+      const suppId = p.supplierId || 'general';
+      const suppName = p.supplierName || 'مورد عام / نقدي';
+      const total = Number(p.total || 0);
+
+      if (suppMap.has(suppId)) {
+        const entry = suppMap.get(suppId)!;
+        entry.total += total;
+        entry.invoicesCount += 1;
+      } else {
+        suppMap.set(suppId, {
+          id: suppId,
+          name: suppName,
+          total,
+          invoicesCount: 1
+        });
+      }
+    });
+
+    return Array.from(suppMap.values()).sort((a, b) => b.total - a.total).slice(0, 8);
+  }, [filteredPurchases]);
+
   // Date Range Human Label
   const dateRangeLabel = useMemo(() => {
     if (datePreset === 'all') return 'كافة السجلات المسجلة بالنظام';
@@ -449,7 +844,7 @@ export default function Reports({
       };
     }
 
-    const prevSalesList = (sales || []).filter(s => {
+    const prevSalesList = (localSales || []).filter(s => {
       if (!s || !s.date) return false;
       const d = s.date.split('T')[0];
       return d >= prevStart! && d <= prevEnd!;
@@ -576,6 +971,210 @@ export default function Reports({
     };
   }, [financialSummary, filteredPurchases]);
 
+  // Advanced multidimensional analytics
+  const advancedAnalytics = useMemo(() => {
+    // 1. Group by Product (Sales & Purchases)
+    const productStats = new Map<string, {
+      id: string;
+      name: string;
+      category: string;
+      soldQty: number;
+      salesRevenue: number;
+      purchasedQty: number;
+      purchaseCost: number;
+    }>();
+
+    // Seed with existing products
+    products.forEach(p => {
+      productStats.set(p.id, {
+        id: p.id,
+        name: p.name,
+        category: p.category || 'عام',
+        soldQty: 0,
+        salesRevenue: 0,
+        purchasedQty: 0,
+        purchaseCost: 0
+      });
+    });
+
+    // Populate Sales
+    filteredSales.forEach(sale => {
+      if (!Array.isArray(sale.items)) return;
+      sale.items.forEach(item => {
+        if (!item || !item.productId) return;
+        const pId = item.productId;
+        const qty = Number(item.quantity || 0);
+        const revenue = Number(item.price || 0) * qty;
+
+        if (productStats.has(pId)) {
+          const stats = productStats.get(pId)!;
+          stats.soldQty += qty;
+          stats.salesRevenue += revenue;
+        } else {
+          productStats.set(pId, {
+            id: pId,
+            name: item.name || 'صنف غير معرف',
+            category: 'عام',
+            soldQty: qty,
+            salesRevenue: revenue,
+            purchasedQty: 0,
+            purchaseCost: 0
+          });
+        }
+      });
+    });
+
+    // Populate Purchases
+    filteredPurchases.forEach(purch => {
+      if (!Array.isArray(purch.items)) return;
+      purch.items.forEach(item => {
+        if (!item || !item.productId) return;
+        const pId = item.productId;
+        const qty = Number(item.quantity || 0);
+        const cost = Number(item.cost || 0) * qty;
+
+        if (productStats.has(pId)) {
+          const stats = productStats.get(pId)!;
+          stats.purchasedQty += qty;
+          stats.purchaseCost += cost;
+        } else {
+          productStats.set(pId, {
+            id: pId,
+            name: item.productName || 'صنف غير معرف',
+            category: 'عام',
+            soldQty: 0,
+            salesRevenue: 0,
+            purchasedQty: qty,
+            purchaseCost: cost
+          });
+        }
+      });
+    });
+
+    const productsList = Array.from(productStats.values());
+
+    // 2. Group by Category / Groups
+    const categoryStats = new Map<string, {
+      name: string;
+      soldQty: number;
+      salesRevenue: number;
+      purchasedQty: number;
+      purchaseCost: number;
+    }>();
+
+    productsList.forEach(p => {
+      const cat = p.category || 'عام';
+      if (!categoryStats.has(cat)) {
+        categoryStats.set(cat, {
+          name: cat,
+          soldQty: 0,
+          salesRevenue: 0,
+          purchasedQty: 0,
+          purchaseCost: 0
+        });
+      }
+      const catStat = categoryStats.get(cat)!;
+      catStat.soldQty += p.soldQty;
+      catStat.salesRevenue += p.salesRevenue;
+      catStat.purchasedQty += p.purchasedQty;
+      catStat.purchaseCost += p.purchaseCost;
+    });
+
+    const categoriesList = Array.from(categoryStats.values());
+
+    // 3. Group by Cashier (Sales only)
+    const cashierStats = new Map<string, {
+      id: string;
+      name: string;
+      totalSales: number;
+      invoiceCount: number;
+    }>();
+
+    filteredSales.forEach(sale => {
+      const cashierId = sale.userId || 'usr-cashier';
+      const cashierName = sale.userName || sale.cashierName || 'الكاشير الرئيسي';
+      const total = Number(sale.finalTotal || sale.total || 0);
+
+      if (!cashierStats.has(cashierId)) {
+        cashierStats.set(cashierId, {
+          id: cashierId,
+          name: cashierName,
+          totalSales: 0,
+          invoiceCount: 0
+        });
+      }
+      const stat = cashierStats.get(cashierId)!;
+      stat.totalSales += total;
+      stat.invoiceCount += 1;
+    });
+
+    const cashiersList = Array.from(cashierStats.values());
+
+    // 4. Group by Branch (Sales & Purchases)
+    const branchStats = new Map<string, {
+      id: string;
+      name: string;
+      salesRevenue: number;
+      salesInvoices: number;
+      purchasesCost: number;
+      purchasesInvoices: number;
+    }>();
+
+    // Map of branch ID to branch name
+    const branchNames = new Map<string, string>();
+    branches.forEach(b => branchNames.set(b.id, b.name));
+    branchNames.set('default', 'الفرع الرئيسي');
+
+    filteredSales.forEach(sale => {
+      const bId = sale.branchId || 'default';
+      const bName = branchNames.get(bId) || `فرع ${bId}`;
+      const total = Number(sale.finalTotal || sale.total || 0);
+
+      if (!branchStats.has(bId)) {
+        branchStats.set(bId, {
+          id: bId,
+          name: bName,
+          salesRevenue: 0,
+          salesInvoices: 0,
+          purchasesCost: 0,
+          purchasesInvoices: 0
+        });
+      }
+      const stat = branchStats.get(bId)!;
+      stat.salesRevenue += total;
+      stat.salesInvoices += 1;
+    });
+
+    filteredPurchases.forEach(purch => {
+      const bId = purch.branchId || 'default';
+      const bName = branchNames.get(bId) || `فرع ${bId}`;
+      const total = Number(purch.total || 0);
+
+      if (!branchStats.has(bId)) {
+        branchStats.set(bId, {
+          id: bId,
+          name: bName,
+          salesRevenue: 0,
+          salesInvoices: 0,
+          purchasesCost: 0,
+          purchasesInvoices: 0
+        });
+      }
+      const stat = branchStats.get(bId)!;
+      stat.purchasesCost += total;
+      stat.purchasesInvoices += 1;
+    });
+
+    const branchesList = Array.from(branchStats.values());
+
+    return {
+      productsList,
+      categoriesList,
+      cashiersList,
+      branchesList
+    };
+  }, [filteredSales, filteredPurchases, products, branches]);
+
   // Direct CSV Exporter with Arabic BOM support
   const exportToCSV = (data: any[], filename: string, headers: { [key: string]: string }) => {
     if (!data || data.length === 0) {
@@ -648,14 +1247,94 @@ export default function Reports({
             <button
               onClick={() => {
                 if (activeTab === 'sales') {
-                  exportToCSV(filteredSales, 'تقرير_المبيعات', {
-                    invoiceNumber: 'رقم الفاتورة',
-                    date: 'التاريخ',
-                    customerName: 'اسم العميل',
-                    paymentMethod: 'طريقة الدفع',
-                    finalTotal: 'الإجمالي (ج.م)',
-                    status: 'الحالة'
+                  const visibleColDefs = salesOrderedKeys
+                    .filter(k => salesVisibleKeys.includes(k) && k !== 'actions')
+                    .map(k => SALES_COLUMNS.find(c => c.key === k))
+                    .filter(Boolean) as { key: string; label: string }[];
+
+                  const columnMapping: Record<string, string> = {};
+                  visibleColDefs.forEach(c => {
+                    columnMapping[c.key] = c.label;
                   });
+
+                  const exportData = filteredSales.map(sale => {
+                    const total = Number(sale.finalTotal || sale.total || 0);
+                    const paid = Number(sale.paidAmount || (sale.paymentMethod === 'credit' ? 0 : total));
+                    const rem = Number(sale.remainingAmount || Math.max(0, total - paid));
+                    const itemCount = Array.isArray(sale.items) ? sale.items.reduce((s, i) => s + (i.quantity || 0), 0) : 0;
+
+                    const row: Record<string, any> = {};
+                    visibleColDefs.forEach(c => {
+                      switch (c.key) {
+                        case 'invoiceNumber': row[c.key] = sale.invoiceNumber || sale.id; break;
+                        case 'date': row[c.key] = sale.date || ''; break;
+                        case 'customer': row[c.key] = sale.customerName || 'عميل نقدي'; break;
+                        case 'cashier': row[c.key] = sale.cashierName || sale.createdBy || 'المدير'; break;
+                        case 'branch': row[c.key] = sale.branchName || 'الفرع الرئيسي'; break;
+                        case 'saleType': row[c.key] = sale.saleType || 'قطاعي'; break;
+                        case 'paymentMethod': row[c.key] = sale.paymentMethod || 'نقدي'; break;
+                        case 'itemCount': row[c.key] = itemCount; break;
+                        case 'total': row[c.key] = sale.total || total; break;
+                        case 'discount': row[c.key] = sale.discount || 0; break;
+                        case 'tax': row[c.key] = sale.taxAmount || 0; break;
+                        case 'finalTotal': row[c.key] = total; break;
+                        case 'paid': row[c.key] = paid; break;
+                        case 'remaining': row[c.key] = rem; break;
+                        case 'status': row[c.key] = sale.status || 'مكتمل'; break;
+                        case 'shiftNumber': row[c.key] = sale.shiftNumber || '-'; break;
+                        case 'notes': row[c.key] = sale.notes || ''; break;
+                        default: row[c.key] = (sale as any)[c.key] ?? '';
+                      }
+                    });
+                    return row;
+                  });
+
+                  exportToCSV(exportData, 'تقرير_المبيعات', columnMapping);
+                } else if (activeTab === 'purchases') {
+                  const visibleColDefs = purchasesOrderedKeys
+                    .filter(k => purchasesVisibleKeys.includes(k) && k !== 'actions')
+                    .map(k => PURCHASES_COLUMNS.find(c => c.key === k))
+                    .filter(Boolean) as { key: string; label: string }[];
+
+                  const columnMapping: Record<string, string> = {};
+                  visibleColDefs.forEach(c => {
+                    columnMapping[c.key] = c.label;
+                  });
+
+                  const exportData = filteredPurchases.map(purch => {
+                    const total = Number(purch.total || 0);
+                    const paid = Number(purch.paidAmount || (purch.paymentMethod === 'cash' ? total : 0));
+                    const rem = Math.max(0, total - paid);
+                    const itemCount = Array.isArray(purch.items) ? purch.items.reduce((s, i) => s + (Number(i.quantity) || 0), 0) : 0;
+
+                    const row: Record<string, any> = {};
+                    visibleColDefs.forEach(c => {
+                      switch (c.key) {
+                        case 'purchaseNumber': row[c.key] = purch.purchaseNumber || `PUR-${purch.id.slice(-6)}`; break;
+                        case 'invoiceNumber': row[c.key] = purch.invoiceNumber || '-'; break;
+                        case 'date': row[c.key] = purch.date || ''; break;
+                        case 'supplier': row[c.key] = purch.supplierName || 'مورد عام'; break;
+                        case 'cashier': row[c.key] = 'المدير'; break;
+                        case 'paymentMethod': 
+                          row[c.key] = purch.paymentMethod === 'cash' ? 'نقدي' :
+                                       purch.paymentMethod === 'deferred-full' ? 'آجل بالكامل' : 'آجل جزئي'; 
+                          break;
+                        case 'itemCount': row[c.key] = itemCount; break;
+                        case 'total': row[c.key] = total; break;
+                        case 'discount': row[c.key] = 0; break;
+                        case 'tax': row[c.key] = (purch as any).vatAmount || 0; break;
+                        case 'finalTotal': row[c.key] = total; break;
+                        case 'paidAmount': row[c.key] = paid; break;
+                        case 'remaining': row[c.key] = rem; break;
+                        case 'status': row[c.key] = rem === 0 ? 'مسدد بالكامل' : paid > 0 ? 'مسدد جزئياً' : 'غير مسدد (آجل)'; break;
+                        case 'notes': row[c.key] = purch.notes || ''; break;
+                        default: row[c.key] = (purch as any)[c.key] ?? '';
+                      }
+                    });
+                    return row;
+                  });
+
+                  exportToCSV(exportData, 'تقرير_المشتريات', columnMapping);
                 } else if (activeTab === 'products') {
                   exportToCSV(productProfitability, 'تقرير_أرباح_الأصناف', {
                     name: 'اسم الصنف',
@@ -760,12 +1439,14 @@ export default function Reports({
             { id: 'categories', label: 'هوامش الأقسام', icon: '📂' },
             { id: 'cashflow', label: 'التدفقات والسيولة', icon: '💧', highlight: true },
             { id: 'sales', label: 'تقرير المبيعات', icon: '🛒' },
+            { id: 'purchases', label: 'تقرير المشتريات', icon: '📥', highlight: true },
             { id: 'products', label: 'أرباح الأصناف', icon: '📦' },
             { id: 'customers', label: 'ديون العملاء', icon: '👥' },
             { id: 'suppliers', label: 'مستحقات الموردين', icon: '🚚' },
             { id: 'expenses', label: 'تحليل المصروفات', icon: '📉' },
             { id: 'inventory', label: 'المخزون والنواقص', icon: '⚠️' },
-            { id: 'tax', label: 'الإقرار الضريبي (VAT)', icon: '🧾' }
+            { id: 'tax', label: 'الإقرار الضريبي (VAT)', icon: '🧾' },
+            { id: 'advanced', label: 'التحليل المتقدم والفروع', icon: '🔮', highlight: true }
           ] as const
         ).map(tab => (
           <button
@@ -965,7 +1646,7 @@ export default function Reports({
             <div className="bg-card p-4 rounded-3xl border border-border">
               <div className="text-text-dim text-xs font-bold mb-1">إجمالي ديون العملاء (لنا)</div>
               <div className="text-xl font-black text-danger">
-                {financialSummary.totalCustomerDebt.toLocaleString('ar-EG')} ج.م
+                { (financialSummary?.totalCustomerDebt || 0).toLocaleString('ar-EG') } ج.م
               </div>
               <div className="text-[11px] text-text-dim mt-1">مستحقات واجبة التحصيل</div>
             </div>
@@ -973,7 +1654,7 @@ export default function Reports({
             <div className="bg-card p-4 rounded-3xl border border-border">
               <div className="text-text-dim text-xs font-bold mb-1">مستحق للموردين (علينا)</div>
               <div className="text-xl font-black text-amber-400">
-                {financialSummary.totalSupplierDebt.toLocaleString('ar-EG')} ج.م
+                {(financialSummary?.totalSupplierDebt || 0).toLocaleString('ar-EG')} ج.م
               </div>
               <div className="text-[11px] text-text-dim mt-1">فواتير شراء آجلة مستحقة السداد</div>
             </div>
@@ -981,13 +1662,15 @@ export default function Reports({
             <div className="bg-card p-4 rounded-3xl border border-border">
               <div className="text-text-dim text-xs font-bold mb-1">قيمة المخزون الحالي (بالتكلفة)</div>
               <div className="text-xl font-black text-accent">
-                {financialSummary.inventoryCostValue.toLocaleString('ar-EG')} ج.م
+                {(financialSummary?.inventoryCostValue || 0).toLocaleString('ar-EG')} ج.م
               </div>
               <div className="text-[11px] text-text-dim mt-1">
-                سعر البيع المتوقع: {financialSummary.inventorySaleValue.toLocaleString('ar-EG')} ج.م
+                سعر البيع المتوقع: {(financialSummary?.inventorySaleValue || 0).toLocaleString('ar-EG')} ج.م
               </div>
             </div>
           </div>
+          
+          <SalesCharts sales={sales} products={products} />
 
           {/* Quick Income Statement (Multi-Step P&L Preview) & Navigation Shortcuts */}
           <div className="bg-card p-6 rounded-3xl border border-border space-y-4">
@@ -1015,7 +1698,7 @@ export default function Reports({
               <div className="bg-card2 p-3.5 rounded-2xl border border-border flex flex-col justify-between">
                 <span className="text-xs text-text-dim font-bold">1. إجمالي المبيعات</span>
                 <span className="text-lg font-black text-text-main mt-2">
-                  {financialSummary.grossSales.toLocaleString('ar-EG')} <span className="text-[10px] font-normal text-text-dim">ج.م</span>
+                  { (financialSummary?.grossSales || 0).toLocaleString('ar-EG') } <span className="text-[10px] font-normal text-text-dim">ج.م</span>
                 </span>
                 <span className="text-[10px] text-text-dim">إيراد النشاط التجاري</span>
               </div>
@@ -1023,7 +1706,7 @@ export default function Reports({
               <div className="bg-card2 p-3.5 rounded-2xl border border-border flex flex-col justify-between">
                 <span className="text-xs text-text-dim font-bold">2. (-) تكلفة البضاعة (COGS)</span>
                 <span className="text-lg font-black text-amber-500 mt-2">
-                  {financialSummary.totalCogs.toLocaleString('ar-EG')} <span className="text-[10px] font-normal text-text-dim">ج.م</span>
+                  { (financialSummary?.totalCogs || 0).toLocaleString('ar-EG') } <span className="text-[10px] font-normal text-text-dim">ج.م</span>
                 </span>
                 <span className="text-[10px] text-text-dim">تكلفة المخزون المباع</span>
               </div>
@@ -1031,7 +1714,7 @@ export default function Reports({
               <div className="bg-card2 p-3.5 rounded-2xl border border-border flex flex-col justify-between">
                 <span className="text-xs text-text-dim font-bold">3. (=) مجمل الربح</span>
                 <span className="text-lg font-black text-emerald-400 mt-2">
-                  {financialSummary.grossProfit.toLocaleString('ar-EG')} <span className="text-[10px] font-normal text-text-dim">ج.م</span>
+                  { (financialSummary?.grossProfit || 0).toLocaleString('ar-EG') } <span className="text-[10px] font-normal text-text-dim">ج.م</span>
                 </span>
                 <span className="text-[10px] text-gold font-bold">هامش: {financialSummary.grossSales > 0 ? Math.round((financialSummary.grossProfit / financialSummary.grossSales) * 100) : 0}%</span>
               </div>
@@ -1039,7 +1722,7 @@ export default function Reports({
               <div className="bg-card2 p-3.5 rounded-2xl border border-border flex flex-col justify-between">
                 <span className="text-xs text-text-dim font-bold">4. (-) المصروفات</span>
                 <span className="text-lg font-black text-danger mt-2">
-                  {financialSummary.totalExpenses.toLocaleString('ar-EG')} <span className="text-[10px] font-normal text-text-dim">ج.م</span>
+                  { (financialSummary?.totalExpenses || 0).toLocaleString('ar-EG') } <span className="text-[10px] font-normal text-text-dim">ج.م</span>
                 </span>
                 <span className="text-[10px] text-text-dim">إيجار، رواتب، كهرباء، إلخ</span>
               </div>
@@ -1049,7 +1732,7 @@ export default function Reports({
               }`}>
                 <span className="text-xs font-bold text-text-main">5. (=) صافي الربح</span>
                 <span className={`text-lg font-black mt-2 ${financialSummary.netProfit >= 0 ? 'text-green-400' : 'text-red-400'}`}>
-                  {financialSummary.netProfit.toLocaleString('ar-EG')} <span className="text-[10px] font-normal text-text-dim">ج.م</span>
+                  { (financialSummary?.netProfit || 0).toLocaleString('ar-EG') } <span className="text-[10px] font-normal text-text-dim">ج.م</span>
                 </span>
                 <span className="text-[10px] text-gold font-bold">صافي: {financialSummary.profitMargin}%</span>
               </div>
@@ -1137,7 +1820,7 @@ export default function Reports({
               />
             </div>
 
-            <div className="flex items-center gap-2 w-full sm:w-auto">
+            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
               <span className="text-xs text-text-dim font-bold">طريقة الدفع:</span>
               <select
                 value={selectedPaymentMethod}
@@ -1150,23 +1833,44 @@ export default function Reports({
                 <option value="card">فيزا / كارت</option>
                 <option value="wallet">محفظة إلكترونية</option>
               </select>
+
+              <button
+                type="button"
+                onClick={() => setShowSalesColModal(true)}
+                className="bg-card2 hover:bg-card border border-border px-3 py-2 rounded-xl text-xs font-bold text-text-main flex items-center gap-1.5 transition-all"
+                title="تخصيص الأعمدة الظاهرة (إظهار/إخفاء الأعمدة)"
+              >
+                <span>⚙️ تخصيص الأعمدة</span>
+              </button>
             </div>
           </div>
+
+          {/* Dynamic Sales Column Customization Modal */}
+          {showSalesColModal && (
+            <ColumnManagerModal
+              tableName="sales"
+              allColumns={SALES_COLUMNS}
+              defaultVisibleKeys={SALES_DEFAULT_VISIBLE}
+              currentVisibleKeys={salesVisibleKeys}
+              currentOrderedKeys={salesOrderedKeys}
+              onSave={(vis, ord) => {
+                setSalesVisibleKeys(vis);
+                setSalesOrderedKeys(ord);
+              }}
+              onClose={() => setShowSalesColModal(false)}
+            />
+          )}
 
           <div className="bg-card rounded-3xl border border-border overflow-hidden shadow-sm">
             <div className="overflow-x-auto">
               <table className="w-full text-right text-xs">
                 <thead className="bg-card2 text-text-dim border-b border-border font-bold">
                   <tr>
-                    <th className="p-3.5">رقم الفاتورة</th>
-                    <th className="p-3.5">التاريخ والوقت</th>
-                    <th className="p-3.5">العميل</th>
-                    <th className="p-3.5">طريقة الدفع</th>
-                    <th className="p-3.5">عدد البنود</th>
-                    <th className="p-3.5">إجمالي الفاتورة</th>
-                    <th className="p-3.5">المدفوع</th>
-                    <th className="p-3.5">المتبقي</th>
-                    <th className="p-3.5">الحالة</th>
+                    {salesOrderedKeys.map(colKey => {
+                      if (!salesVisibleKeys.includes(colKey)) return null;
+                      const colDef = SALES_COLUMNS.find(c => c.key === colKey);
+                      return <th key={colKey} className="p-3.5">{colDef?.label}</th>;
+                    })}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
@@ -1178,43 +1882,578 @@ export default function Reports({
 
                     return (
                       <tr key={sale.id || idx} className="hover:bg-card2/50 transition-colors">
-                        <td className="p-3.5 font-mono font-bold text-text-main">
-                          {sale.invoiceNumber || sale.id.slice(0, 8)}
-                        </td>
-                        <td className="p-3.5 text-text-dim">
-                          {sale.date ? new Date(sale.date).toLocaleDateString('ar-EG') : '-'}
-                        </td>
-                        <td className="p-3.5 font-bold text-text-main">
-                          {sale.customerName || 'عميل نقدي'}
-                        </td>
-                        <td className="p-3.5">
-                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                            sale.paymentMethod === 'credit' ? 'bg-red-500/20 text-red-400' :
-                            sale.paymentMethod === 'card' ? 'bg-blue-500/20 text-blue-400' :
-                            sale.paymentMethod === 'wallet' ? 'bg-purple-500/20 text-purple-400' :
-                            'bg-green-500/20 text-green-400'
-                          }`}>
-                            {sale.paymentMethod === 'credit' ? 'آجل' :
-                             sale.paymentMethod === 'card' ? 'كارت' :
-                             sale.paymentMethod === 'wallet' ? 'محفظة' : 'نقدي'}
-                          </span>
-                        </td>
-                        <td className="p-3.5 text-text-dim">{itemCount} قطعة</td>
-                        <td className="p-3.5 font-black text-text-main">{total.toLocaleString('ar-EG')} ج.م</td>
-                        <td className="p-3.5 font-bold text-green-400">{paid.toLocaleString('ar-EG')} ج.م</td>
-                        <td className="p-3.5 font-bold text-danger">{rem > 0 ? `${rem.toLocaleString('ar-EG')} ج.م` : '-'}</td>
-                        <td className="p-3.5">
-                          <span className="bg-card2 px-2 py-0.5 rounded-md text-[10px] font-bold text-text-dim">
-                            {sale.status || 'مكتمل'}
-                          </span>
-                        </td>
+                        {salesOrderedKeys.map(colKey => {
+                          if (!salesVisibleKeys.includes(colKey)) return null;
+                          switch (colKey) {
+                            case 'invoiceNumber':
+                              return (
+                                <td key={colKey} className="p-3.5 font-mono font-bold text-text-main">
+                                  #{sale.invoiceNumber || sale.id.slice(0, 8)}
+                                </td>
+                              );
+                            case 'date':
+                              return (
+                                <td key={colKey} className="p-3.5 text-text-dim font-mono">
+                                  {sale.date ? new Date(sale.date).toLocaleString('ar-EG') : 'غير محدد'}
+                                </td>
+                              );
+                            case 'customer':
+                              return (
+                                <td key={colKey} className="p-3.5 font-bold text-text-main">
+                                  {sale.customerName || 'عميل نقدي'}
+                                </td>
+                              );
+                            case 'cashier':
+                              return (
+                                <td key={colKey} className="p-3.5 text-text-dim font-bold">
+                                  {sale.cashierName || sale.createdBy || 'المدير'}
+                                </td>
+                              );
+                            case 'branch':
+                              return (
+                                <td key={colKey} className="p-3.5 text-text-dim font-mono">
+                                  {sale.branchName || 'الفرع الرئيسي'}
+                                </td>
+                              );
+                            case 'paymentMethod':
+                              return (
+                                <td key={colKey} className="p-3.5">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    sale.paymentMethod === 'credit' ? 'bg-red-500/20 text-red-400' :
+                                    sale.paymentMethod === 'card' ? 'bg-blue-500/20 text-blue-400' :
+                                    sale.paymentMethod === 'wallet' ? 'bg-purple-500/20 text-purple-400' :
+                                    'bg-green-500/20 text-green-400'
+                                  }`}>
+                                    {sale.paymentMethod === 'credit' ? 'آجل' :
+                                     sale.paymentMethod === 'card' ? 'كارت' :
+                                     sale.paymentMethod === 'wallet' ? 'محفظة' : 'نقدي'}
+                                  </span>
+                                </td>
+                              );
+                            case 'itemCount':
+                              return (
+                                <td key={colKey} className="p-3.5 text-text-main font-bold">
+                                  {itemCount} قطع
+                                </td>
+                              );
+                            case 'total':
+                              return (
+                                <td key={colKey} className="p-3.5 font-bold text-text-dim">
+                                  {(sale.total || total).toLocaleString('ar-EG')} ج.م
+                                </td>
+                              );
+                            case 'discount':
+                              return (
+                                <td key={colKey} className="p-3.5 font-bold text-red-400">
+                                  {(sale.discount || 0).toLocaleString('ar-EG')} ج.م
+                                </td>
+                              );
+                            case 'tax':
+                              return (
+                                <td key={colKey} className="p-3.5 font-bold text-blue-400">
+                                  {(sale.taxAmount || 0).toLocaleString('ar-EG')} ج.م
+                                </td>
+                              );
+                            case 'finalTotal':
+                              return (
+                                <td key={colKey} className="p-3.5 font-black text-text-main">
+                                  {total.toLocaleString('ar-EG')} ج.م
+                                </td>
+                              );
+                            case 'paid':
+                              return (
+                                <td key={colKey} className="p-3.5 font-bold text-green-400">
+                                  {paid.toLocaleString('ar-EG')} ج.م
+                                </td>
+                              );
+                            case 'remaining':
+                              return (
+                                <td key={colKey} className="p-3.5 font-bold text-danger">
+                                  {rem > 0 ? `${rem.toLocaleString('ar-EG')} ج.م` : '-'}
+                                </td>
+                              );
+                            case 'status':
+                              return (
+                                <td key={colKey} className="p-3.5">
+                                  <span className="bg-card2 px-2 py-0.5 rounded-md text-[10px] font-bold text-text-dim">
+                                    {sale.status || 'مكتمل'}
+                                  </span>
+                                </td>
+                              );
+                            case 'shiftNumber':
+                              return (
+                                <td key={colKey} className="p-3.5 text-text-dim font-mono">
+                                  {sale.sessionId || '-'}
+                                </td>
+                              );
+                            case 'notes':
+                              return (
+                                <td key={colKey} className="p-3.5 text-text-dim max-w-[150px] truncate" title={sale.notes || ''}>
+                                  {sale.notes || '-'}
+                                </td>
+                              );
+                            case 'actions':
+                              return (
+                                <td key={colKey} className="p-3.5 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() => setSaleToDelete(sale)}
+                                    className="bg-danger/15 hover:bg-danger text-danger hover:text-white border border-danger/30 px-3 py-1.5 rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+                                    title="حذف الفاتورة نهائياً وإرجاع الكميات للمخزن"
+                                  >
+                                    <Trash2 size={13} />
+                                    <span>حذف الفاتورة</span>
+                                  </button>
+                                </td>
+                              );
+                            default:
+                              return null;
+                          }
+                        })}
                       </tr>
                     );
                   })}
                   {filteredSales.length === 0 && (
                     <tr>
-                      <td colSpan={9} className="p-8 text-center text-text-dim text-xs">
+                      <td colSpan={salesVisibleKeys.length} className="p-8 text-center text-text-dim text-xs">
                         لا توجد فواتير مبيعات مسجلة في هذا النطاق الزمني
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 2.5: PURCHASES REPORT & SUPPLIERS INVOICES */}
+      {activeTab === 'purchases' && (
+        <div className="space-y-6">
+          {/* Top Control & Filter Bar for Purchases */}
+          <div className="bg-card p-4 rounded-3xl border border-border flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 shadow-sm">
+            {/* Search Input */}
+            <div className="relative flex-1">
+              <input
+                type="text"
+                placeholder="بحث برقم فاتورة المشتريات، اسم المورد، الصنف، أو الملاحظات..."
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+                className="w-full bg-card2 border border-border rounded-2xl pr-10 pl-4 py-2.5 text-xs text-text-main placeholder-text-dim outline-none focus:border-gold transition-all"
+              />
+              <Search className="absolute right-3.5 top-1/2 -translate-y-1/2 text-text-dim w-4 h-4" />
+            </div>
+
+            {/* Quick Filters: Payment Method & Supplier */}
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={selectedPaymentMethod}
+                onChange={e => setSelectedPaymentMethod(e.target.value)}
+                className="bg-card2 border border-border rounded-2xl px-3 py-2 text-xs font-bold text-text-main outline-none focus:border-gold cursor-pointer"
+              >
+                <option value="all">كل طرق الدفع</option>
+                <option value="cash">نقدي فقط (Cash)</option>
+                <option value="deferred-full">آجل بالكامل (Credit)</option>
+                <option value="deferred-partial">سداد جزئي (Partial)</option>
+              </select>
+
+              <select
+                value={selectedCustomerSupplierId}
+                onChange={e => setSelectedCustomerSupplierId(e.target.value)}
+                className="bg-card2 border border-border rounded-2xl px-3 py-2 text-xs font-bold text-text-main outline-none focus:border-gold cursor-pointer"
+              >
+                <option value="all">كل الموردين</option>
+                {(suppliers || []).map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                onClick={() => setShowPurchasesColModal(true)}
+                className="bg-card2 hover:bg-border text-text-main border border-border px-3.5 py-2 rounded-2xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm"
+                title="تخصيص وإعادة ترتيب أعمدة جدول المشتريات"
+              >
+                <span>⚙️</span>
+                <span>تخصيص الأعمدة</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Purchases Executive KPI Cards */}
+          <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+            {/* Total Purchases */}
+            <div className="bg-card p-4 rounded-3xl border border-border shadow-sm flex flex-col justify-between">
+              <div>
+                <div className="flex justify-between items-center text-text-dim text-xs font-bold mb-1">
+                  <span>إجمالي المشتريات</span>
+                  <span className="p-1.5 rounded-xl bg-amber-500/10 text-amber-500">
+                    <Truck size={16} />
+                  </span>
+                </div>
+                <div className="text-xl sm:text-2xl font-black text-amber-500 tracking-tight">
+                  {purchasesSummary.totalPurchases.toLocaleString('ar-EG')} <span className="text-xs font-normal text-text-dim">ج.م</span>
+                </div>
+              </div>
+              <div className="text-[11px] text-text-dim mt-2 pt-2 border-t border-border flex justify-between items-center">
+                <span>عدد فواتير الشراء:</span>
+                <span className="font-mono font-bold text-text-main">{purchasesSummary.invoicesCount} فاتورة</span>
+              </div>
+            </div>
+
+            {/* Total Paid to Suppliers */}
+            <div className="bg-card p-4 rounded-3xl border border-border shadow-sm flex flex-col justify-between">
+              <div>
+                <div className="flex justify-between items-center text-text-dim text-xs font-bold mb-1">
+                  <span>المسدد للموردين</span>
+                  <span className="p-1.5 rounded-xl bg-green-500/10 text-green-400">
+                    <Wallet size={16} />
+                  </span>
+                </div>
+                <div className="text-xl sm:text-2xl font-black text-green-400 tracking-tight">
+                  {purchasesSummary.totalPaid.toLocaleString('ar-EG')} <span className="text-xs font-normal text-text-dim">ج.م</span>
+                </div>
+              </div>
+              <div className="text-[11px] text-text-dim mt-2 pt-2 border-t border-border flex justify-between items-center">
+                <span>نسبة السداد النقدي:</span>
+                <span className="font-mono font-bold text-green-400">
+                  {purchasesSummary.totalPurchases > 0 ? Math.round((purchasesSummary.totalPaid / purchasesSummary.totalPurchases) * 100) : 100}%
+                </span>
+              </div>
+            </div>
+
+            {/* Total Remaining to Suppliers */}
+            <div className="bg-card p-4 rounded-3xl border border-border shadow-sm flex flex-col justify-between">
+              <div>
+                <div className="flex justify-between items-center text-text-dim text-xs font-bold mb-1">
+                  <span>المتبقي والآجل للموردين</span>
+                  <span className="p-1.5 rounded-xl bg-danger/10 text-danger">
+                    <AlertTriangle size={16} />
+                  </span>
+                </div>
+                <div className="text-xl sm:text-2xl font-black text-danger tracking-tight">
+                  {purchasesSummary.totalRemaining.toLocaleString('ar-EG')} <span className="text-xs font-normal text-text-dim">ج.م</span>
+                </div>
+              </div>
+              <div className="text-[11px] text-text-dim mt-2 pt-2 border-t border-border flex justify-between items-center">
+                <span>فواتير آجلة / جزئية:</span>
+                <span className="font-mono font-bold text-danger">
+                  {filteredPurchases.filter(p => {
+                    const tot = Number(p.total || 0);
+                    const pd = Number(p.paidAmount || (p.paymentMethod === 'cash' ? tot : 0));
+                    return tot - pd > 0;
+                  }).length} فاتورة
+                </span>
+              </div>
+            </div>
+
+            {/* Total Purchased Items */}
+            <div className="bg-card p-4 rounded-3xl border border-border shadow-sm flex flex-col justify-between">
+              <div>
+                <div className="flex justify-between items-center text-text-dim text-xs font-bold mb-1">
+                  <span>إجمالي الكميات والقطع</span>
+                  <span className="p-1.5 rounded-xl bg-sky-500/10 text-sky-400">
+                    <PackageCheck size={16} />
+                  </span>
+                </div>
+                <div className="text-xl sm:text-2xl font-black text-sky-400 tracking-tight">
+                  {purchasesSummary.totalItemsCount.toLocaleString('ar-EG')} <span className="text-xs font-normal text-text-dim">قطعة</span>
+                </div>
+              </div>
+              <div className="text-[11px] text-text-dim mt-2 pt-2 border-t border-border flex justify-between items-center">
+                <span>متوسط قيمة الفاتورة:</span>
+                <span className="font-mono font-bold text-text-main">{purchasesSummary.avgInvoiceValue.toLocaleString('ar-EG')} ج.م</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Visual Charts: Daily Trend & Top Suppliers */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            {/* Chart 1: Purchases Daily Trend (2 cols) */}
+            <div className="bg-card p-5 rounded-3xl border border-border shadow-sm lg:col-span-2">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="font-bold text-sm text-text-main flex items-center gap-2">
+                  <span className="text-amber-500">📈</span>
+                  <span>حركة المشتريات اليومية ومقارنة المدفوع بالآجل</span>
+                </h3>
+                <span className="text-xs text-text-dim">{dateRangeLabel}</span>
+              </div>
+              <div className="h-64 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={purchasesChartData} margin={{ top: 10, right: 10, left: 10, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="purchTotalGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#F59E0B" stopOpacity={0.4}/>
+                        <stop offset="95%" stopColor="#F59E0B" stopOpacity={0.0}/>
+                      </linearGradient>
+                      <linearGradient id="purchPaidGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#10B981" stopOpacity={0.4}/>
+                        <stop offset="95%" stopColor="#10B981" stopOpacity={0.0}/>
+                      </linearGradient>
+                    </defs>
+                    <XAxis dataKey="date" stroke="#6B7280" fontSize={11} />
+                    <YAxis stroke="#6B7280" fontSize={11} tickFormatter={(val) => `${val}`} />
+                    <Tooltip 
+                      contentStyle={{ backgroundColor: '#18181B', borderColor: '#27272A', borderRadius: '16px', fontSize: '12px' }} 
+                      formatter={(value: any) => [`${Number(value).toLocaleString('ar-EG')} ج.م`, '']}
+                    />
+                    <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+                    <Area type="monotone" dataKey="total" name="إجمالي المشتريات" stroke="#F59E0B" strokeWidth={2.5} fillOpacity={1} fill="url(#purchTotalGrad)" />
+                    <Area type="monotone" dataKey="paid" name="المسدد نقداً" stroke="#10B981" strokeWidth={2} fillOpacity={1} fill="url(#purchPaidGrad)" />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            {/* Chart 2: Top Suppliers Breakdown (1 col) */}
+            <div className="bg-card p-5 rounded-3xl border border-border shadow-sm flex flex-col justify-between">
+              <div>
+                <h3 className="font-bold text-sm text-text-main flex items-center gap-2 mb-3">
+                  <span className="text-sky-400">🚚</span>
+                  <span>أعلى الموردين توريداً حسب القيمة</span>
+                </h3>
+                <div className="space-y-3">
+                  {supplierPurchasesBreakdown.slice(0, 5).map((supp, idx) => {
+                    const percentage = purchasesSummary.totalPurchases > 0 
+                      ? Math.round((supp.total / purchasesSummary.totalPurchases) * 100) 
+                      : 0;
+                    return (
+                      <div key={supp.id || idx} className="space-y-1">
+                        <div className="flex justify-between text-xs font-bold">
+                          <span className="text-text-main">{supp.name}</span>
+                          <span className="text-amber-500 font-mono">{supp.total.toLocaleString('ar-EG')} ج.م ({percentage}%)</span>
+                        </div>
+                        <div className="w-full bg-card2 rounded-full h-2 overflow-hidden border border-border">
+                          <div
+                            className="bg-amber-500 h-full rounded-full transition-all duration-500"
+                            style={{ width: `${Math.min(100, Math.max(5, percentage))}%` }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {supplierPurchasesBreakdown.length === 0 && (
+                    <div className="p-8 text-center text-text-dim text-xs">
+                      لا توجد فواتير مشتريات مسجلة في هذا النطاق
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="pt-3 border-t border-border mt-3 text-[11px] text-text-dim flex justify-between items-center">
+                <span>إجمالي عدد الموردين المتعامل معهم:</span>
+                <span className="font-mono font-bold text-text-main">{supplierPurchasesBreakdown.length} مورد</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Column Manager Modal for Purchases */}
+          {showPurchasesColModal && (
+            <ColumnManagerModal
+              tableName="purchases"
+              allColumns={PURCHASES_COLUMNS}
+              defaultVisibleKeys={PURCHASES_DEFAULT_VISIBLE}
+              currentVisibleKeys={purchasesVisibleKeys}
+              currentOrderedKeys={purchasesOrderedKeys}
+              onSave={(vis, ord) => {
+                setPurchasesVisibleKeys(vis);
+                setPurchasesOrderedKeys(ord);
+              }}
+              onClose={() => setShowPurchasesColModal(false)}
+            />
+          )}
+
+          {/* Purchases Data Table */}
+          <div className="bg-card rounded-3xl border border-border overflow-hidden shadow-sm">
+            <div className="p-4 border-b border-border flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-amber-500/10 text-amber-500">
+                  <Receipt size={18} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-text-main">سجل فواتير وأذون المشتريات</h3>
+                  <p className="text-[11px] text-text-dim">عرض كافة حركات التوريد والتكاليف وأرصدة الموردين</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-text-dim">عدد الفواتير المعروضة: {filteredPurchases.length}</span>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-right text-xs">
+                <thead className="bg-card2 text-text-dim border-b border-border font-bold">
+                  <tr>
+                    {purchasesOrderedKeys
+                      .filter(k => purchasesVisibleKeys.includes(k))
+                      .map(colKey => {
+                        const colDef = PURCHASES_COLUMNS.find(c => c.key === colKey);
+                        return (
+                          <th key={colKey} className={`p-3.5 ${colKey === 'actions' ? 'text-center' : ''}`}>
+                            {colDef ? colDef.label : colKey}
+                          </th>
+                        );
+                      })}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {filteredPurchases.map((purch, idx) => {
+                    const total = Number(purch.total || 0);
+                    const paid = Number(purch.paidAmount || (purch.paymentMethod === 'cash' ? total : 0));
+                    const remaining = Math.max(0, total - paid);
+                    const itemCount = Array.isArray(purch.items) ? purch.items.reduce((s, i) => s + (Number(i.quantity) || 0), 0) : 0;
+
+                    return (
+                      <tr key={purch.id || idx} className="hover:bg-card2/50 transition-colors">
+                        {purchasesOrderedKeys.filter(k => purchasesVisibleKeys.includes(k)).map(colKey => {
+                          switch (colKey) {
+                            case 'purchaseNumber':
+                              return (
+                                <td key={colKey} className="p-3.5 font-mono font-bold text-text-main">
+                                  #{purch.purchaseNumber || `PUR-${purch.id.slice(-6)}`}
+                                </td>
+                              );
+                            case 'invoiceNumber':
+                              return (
+                                <td key={colKey} className="p-3.5 font-mono text-text-dim">
+                                  {purch.invoiceNumber ? `#${purch.invoiceNumber}` : '-'}
+                                </td>
+                              );
+                            case 'date':
+                              return (
+                                <td key={colKey} className="p-3.5 font-mono text-text-dim">
+                                  {purch.date ? new Date(purch.date).toLocaleString('ar-EG') : '-'}
+                                </td>
+                              );
+                            case 'supplier':
+                              return (
+                                <td key={colKey} className="p-3.5 font-bold text-text-main flex items-center gap-1.5">
+                                  <Truck size={14} className="text-amber-500 shrink-0" />
+                                  <span>{purch.supplierName || 'مورد عام / نقدي'}</span>
+                                </td>
+                              );
+                            case 'cashier':
+                              return (
+                                <td key={colKey} className="p-3.5 text-text-dim">
+                                  المدير
+                                </td>
+                              );
+                            case 'paymentMethod':
+                              return (
+                                <td key={colKey} className="p-3.5">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    purch.paymentMethod === 'cash' 
+                                      ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
+                                      : purch.paymentMethod === 'deferred-partial'
+                                      ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                                      : 'bg-red-500/20 text-red-400 border border-red-500/30'
+                                  }`}>
+                                    {purch.paymentMethod === 'cash' ? 'نقدي' :
+                                     purch.paymentMethod === 'deferred-full' ? 'آجل بالكامل' : 'سداد جزئي'}
+                                  </span>
+                                </td>
+                              );
+                            case 'itemCount':
+                              return (
+                                <td key={colKey} className="p-3.5 font-bold text-text-main font-mono">
+                                  <span className="bg-card2 px-2 py-0.5 rounded-lg border border-border">
+                                    {purch.items?.length || 0} صنف ({itemCount} ق)
+                                  </span>
+                                </td>
+                              );
+                            case 'total':
+                              return (
+                                <td key={colKey} className="p-3.5 font-mono text-text-dim">
+                                  {total.toLocaleString('ar-EG')} ج.م
+                                </td>
+                              );
+                            case 'discount':
+                              return (
+                                <td key={colKey} className="p-3.5 font-mono text-text-dim">
+                                  0 ج.م
+                                </td>
+                              );
+                            case 'tax':
+                              return (
+                                <td key={colKey} className="p-3.5 font-mono text-text-dim">
+                                  {((purch as any).vatAmount || 0).toLocaleString('ar-EG')} ج.م
+                                </td>
+                              );
+                            case 'finalTotal':
+                              return (
+                                <td key={colKey} className="p-3.5 font-bold font-mono text-amber-500">
+                                  {total.toLocaleString('ar-EG')} ج.م
+                                </td>
+                              );
+                            case 'paidAmount':
+                              return (
+                                <td key={colKey} className="p-3.5 font-bold font-mono text-green-400">
+                                  {paid.toLocaleString('ar-EG')} ج.م
+                                </td>
+                              );
+                            case 'remaining':
+                              return (
+                                <td key={colKey} className={`p-3.5 font-bold font-mono ${remaining > 0 ? 'text-danger' : 'text-text-dim'}`}>
+                                  {remaining > 0 ? `${remaining.toLocaleString('ar-EG')} ج.م` : '-'}
+                                </td>
+                              );
+                            case 'status':
+                              return (
+                                <td key={colKey} className="p-3.5">
+                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    remaining === 0 
+                                      ? 'bg-green-500/20 text-green-400' 
+                                      : paid > 0 
+                                      ? 'bg-amber-500/20 text-amber-400' 
+                                      : 'bg-red-500/20 text-red-400'
+                                  }`}>
+                                    {remaining === 0 ? 'مسدد بالكامل' : paid > 0 ? 'مسدد جزئياً' : 'غير مسدد (آجل)'}
+                                  </span>
+                                </td>
+                              );
+                            case 'notes':
+                              return (
+                                <td key={colKey} className="p-3.5 text-text-dim max-w-[150px] truncate" title={purch.notes || ''}>
+                                  {purch.notes || '-'}
+                                </td>
+                              );
+                            case 'actions':
+                              return (
+                                <td key={colKey} className="p-3.5 text-center">
+                                  <div className="flex items-center justify-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => setViewingPurchase(purch)}
+                                      className="bg-card2 hover:bg-card text-text-main border border-border px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1 shadow-sm active:scale-95 cursor-pointer"
+                                      title="معاينة تفاصيل الأصناف وبنود الفاتورة"
+                                    >
+                                      <Eye size={13} className="text-sky-400" />
+                                      <span>معاينة</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => setPurchaseToDelete(purch)}
+                                      className="bg-danger/15 hover:bg-danger text-danger hover:text-white border border-danger/30 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all inline-flex items-center gap-1 shadow-sm active:scale-95 cursor-pointer"
+                                      title="حذف فاتورة المشتريات نهائياً وخصم الكميات من المخزن"
+                                    >
+                                      <Trash2 size={13} />
+                                      <span>حذف</span>
+                                    </button>
+                                  </div>
+                                </td>
+                              );
+                            default:
+                              return null;
+                          }
+                        })}
+                      </tr>
+                    );
+                  })}
+                  {filteredPurchases.length === 0 && (
+                    <tr>
+                      <td colSpan={purchasesVisibleKeys.length} className="p-8 text-center text-text-dim text-xs">
+                        لا توجد فواتير مشتريات مسجلة في هذا النطاق الزمني
                       </td>
                     </tr>
                   )}
@@ -1583,26 +2822,673 @@ export default function Reports({
         </div>
       )}
 
+      {/* TAB: ADVANCED SALES & PURCHASES ANALYSIS (ITEMS, GROUPS, CASHIER, BRANCH) */}
+      {activeTab === 'advanced' && (
+        <div className="space-y-6">
+          {/* Section 1: KPI Grid for Quick Metrics */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-card p-4 rounded-3xl border border-border shadow-sm">
+              <div className="text-text-dim text-xs font-bold mb-1">عدد الفروع النشطة</div>
+              <div className="text-2xl font-black text-gold">
+                {advancedAnalytics.branchesList.length.toLocaleString('ar-EG')} فرع
+              </div>
+            </div>
+            <div className="bg-card p-4 rounded-3xl border border-border shadow-sm">
+              <div className="text-text-dim text-xs font-bold mb-1">إجمالي الكاشيرات العاملة</div>
+              <div className="text-2xl font-black text-green-400">
+                {advancedAnalytics.cashiersList.length.toLocaleString('ar-EG')} كاشير
+              </div>
+            </div>
+            <div className="bg-card p-4 rounded-3xl border border-border shadow-sm">
+              <div className="text-text-dim text-xs font-bold mb-1">إجمالي المبيعات (الفترة)</div>
+              <div className="text-2xl font-black text-text-main">
+                {financialSummary.grossSales.toLocaleString('ar-EG')} ج.م
+              </div>
+            </div>
+            <div className="bg-card p-4 rounded-3xl border border-border shadow-sm">
+              <div className="text-text-dim text-xs font-bold mb-1">إجمالي المشتريات (الفترة)</div>
+              <div className="text-2xl font-black text-amber-500">
+                {filteredPurchases.reduce((sum, p) => sum + Number(p.total || 0), 0).toLocaleString('ar-EG')} ج.م
+              </div>
+            </div>
+          </div>
+
+          {/* Section 2: Category Breakdown Table & Chart */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="bg-card p-5 rounded-3xl border border-border shadow-sm">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="font-bold text-sm text-text-main flex items-center gap-1.5">
+                  <span>📂</span> تحليل المبيعات والمشتريات حسب المجموعات
+                </h3>
+                <button
+                  onClick={() => exportToCSV(advancedAnalytics.categoriesList, 'category_analysis.csv', {
+                    name: 'المجموعة/التصنيف',
+                    soldQty: 'الكمية المباعة',
+                    salesRevenue: 'قيمة المبيعات (ج.م)',
+                    purchasedQty: 'الكمية المشتراة',
+                    purchaseCost: 'تكلفة المشتريات (ج.م)'
+                  })}
+                  className="text-gold hover:text-white transition-colors text-xs flex items-center gap-1 font-bold"
+                >
+                  <Download className="w-3.5 h-3.5" /> تصدير
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-right text-xs">
+                  <thead className="bg-card2 text-text-dim border-b border-border font-bold">
+                    <tr>
+                      <th className="p-3">اسم المجموعة</th>
+                      <th className="p-3">الكمية المباعة</th>
+                      <th className="p-3">إيراد المبيعات</th>
+                      <th className="p-3">الكمية المشتراة</th>
+                      <th className="p-3">تكلفة الشراء</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {advancedAnalytics.categoriesList.map((cat, idx) => (
+                      <tr key={idx} className="hover:bg-card2/50 transition-colors">
+                        <td className="p-3 font-bold text-text-main">{cat.name}</td>
+                        <td className="p-3 text-text-dim">{cat.soldQty.toLocaleString('ar-EG')}</td>
+                        <td className="p-3 font-bold text-green-400">{cat.salesRevenue.toLocaleString('ar-EG')} ج.م</td>
+                        <td className="p-3 text-text-dim">{cat.purchasedQty.toLocaleString('ar-EG')}</td>
+                        <td className="p-3 font-bold text-amber-500">{cat.purchaseCost.toLocaleString('ar-EG')} ج.م</td>
+                      </tr>
+                    ))}
+                    {advancedAnalytics.categoriesList.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="p-4 text-center text-text-dim">لا توجد بيانات مجموعات</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div className="bg-card p-5 rounded-3xl border border-border shadow-sm">
+              <h3 className="font-bold text-sm text-text-main mb-4 flex items-center gap-1.5">
+                <span>📊</span> مقارنة قيم مبيعات ومشتريات المجموعات
+              </h3>
+              <div className="h-64 w-full">
+                {advancedAnalytics.categoriesList.length > 0 ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={advancedAnalytics.categoriesList}>
+                      <XAxis dataKey="name" stroke="#94A3B8" fontSize={11} />
+                      <YAxis stroke="#94A3B8" fontSize={11} />
+                      <Tooltip contentStyle={{ backgroundColor: '#1E293B', borderColor: '#334155', borderRadius: '12px', color: '#FFF' }} />
+                      <Legend />
+                      <Bar dataKey="salesRevenue" name="المبيعات (ج.م)" fill="#10B981" radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="purchaseCost" name="المشتريات (ج.م)" fill="#F59E0B" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-full flex items-center justify-center text-text-dim text-xs">لا توجد بيانات للمخطط</div>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Section 3: Branch and Cashier Analysis */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Cashier Report */}
+            <div className="bg-card p-5 rounded-3xl border border-border shadow-sm">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="font-bold text-sm text-text-main flex items-center gap-1.5">
+                  <span>👤</span> أداء وتحليل مبيعات الكاشير
+                </h3>
+                <button
+                  onClick={() => exportToCSV(advancedAnalytics.cashiersList, 'cashier_analysis.csv', {
+                    name: 'اسم الكاشير',
+                    totalSales: 'إجمالي المبيعات (ج.م)',
+                    invoiceCount: 'عدد الفواتير'
+                  })}
+                  className="text-gold hover:text-white transition-colors text-xs flex items-center gap-1 font-bold"
+                >
+                  <Download className="w-3.5 h-3.5" /> تصدير
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-right text-xs">
+                  <thead className="bg-card2 text-text-dim border-b border-border font-bold">
+                    <tr>
+                      <th className="p-3">اسم الكاشير</th>
+                      <th className="p-3">إجمالي المبيعات</th>
+                      <th className="p-3">عدد الفواتير</th>
+                      <th className="p-3">متوسط قيمة الفاتورة</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {advancedAnalytics.cashiersList.map((cashier, idx) => (
+                      <tr key={idx} className="hover:bg-card2/50 transition-colors">
+                        <td className="p-3 font-bold text-text-main">{cashier.name}</td>
+                        <td className="p-3 font-black text-green-400">{cashier.totalSales.toLocaleString('ar-EG')} ج.م</td>
+                        <td className="p-3 text-text-dim">{cashier.invoiceCount.toLocaleString('ar-EG')} فواتير</td>
+                        <td className="p-3 font-mono text-text-main">
+                          {Math.round(cashier.totalSales / (cashier.invoiceCount || 1)).toLocaleString('ar-EG')} ج.م
+                        </td>
+                      </tr>
+                    ))}
+                    {advancedAnalytics.cashiersList.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="p-4 text-center text-text-dim">لا توجد بيانات كاشير مسجلة</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Branch Report */}
+            <div className="bg-card p-5 rounded-3xl border border-border shadow-sm">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="font-bold text-sm text-text-main flex items-center gap-1.5">
+                  <span>🏢</span> أداء وتحليل الفروع (مبيعات ومشتريات)
+                </h3>
+                <button
+                  onClick={() => exportToCSV(advancedAnalytics.branchesList, 'branch_analysis.csv', {
+                    name: 'اسم الفرع',
+                    salesRevenue: 'مبيعات الفرع (ج.م)',
+                    salesInvoices: 'فواتير البيع',
+                    purchasesCost: 'مشتريات الفرع (ج.م)',
+                    purchasesInvoices: 'فواتير الشراء'
+                  })}
+                  className="text-gold hover:text-white transition-colors text-xs flex items-center gap-1 font-bold"
+                >
+                  <Download className="w-3.5 h-3.5" /> تصدير
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-right text-xs">
+                  <thead className="bg-card2 text-text-dim border-b border-border font-bold">
+                    <tr>
+                      <th className="p-3">اسم الفرع</th>
+                      <th className="p-3">إيراد المبيعات</th>
+                      <th className="p-3">فواتير البيع</th>
+                      <th className="p-3">تكلفة المشتريات</th>
+                      <th className="p-3">فواتير الشراء</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {advancedAnalytics.branchesList.map((branch, idx) => (
+                      <tr key={idx} className="hover:bg-card2/50 transition-colors">
+                        <td className="p-3 font-bold text-text-main">{branch.name}</td>
+                        <td className="p-3 font-black text-green-400">{branch.salesRevenue.toLocaleString('ar-EG')} ج.م</td>
+                        <td className="p-3 text-text-dim">{branch.salesInvoices.toLocaleString('ar-EG')} فواتير</td>
+                        <td className="p-3 font-black text-amber-500">{branch.purchasesCost.toLocaleString('ar-EG')} ج.م</td>
+                        <td className="p-3 text-text-dim">{branch.purchasesInvoices.toLocaleString('ar-EG')} فواتير</td>
+                      </tr>
+                    ))}
+                    {advancedAnalytics.branchesList.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="p-4 text-center text-text-dim">لا توجد بيانات فروع مسجلة</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 4: Detailed Product Flow (Sales and Purchases comparison per item) */}
+          <div className="bg-card p-5 rounded-3xl border border-border shadow-sm">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4">
+              <h3 className="font-bold text-sm text-text-main flex items-center gap-1.5">
+                <span>📦</span> حركة الأصناف التفصيلية (مبيعات ومشتريات بالصنف)
+              </h3>
+              <div className="flex gap-2 w-full sm:w-auto">
+                <button
+                  onClick={() => exportToCSV(advancedAnalytics.productsList, 'product_flow_analysis.csv', {
+                    name: 'اسم الصنف',
+                    category: 'المجموعة',
+                    soldQty: 'الكمية المباعة',
+                    salesRevenue: 'قيمة المبيعات (ج.م)',
+                    purchasedQty: 'الكمية المشتراة',
+                    purchaseCost: 'تكلفة المشتريات (ج.م)'
+                  })}
+                  className="bg-card2 border border-border text-gold px-3.5 py-1.5 rounded-xl text-xs hover:text-white transition-all flex items-center gap-1.5 font-bold"
+                >
+                  <Download className="w-3.5 h-3.5" /> تصدير التقرير
+                </button>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-right text-xs">
+                <thead className="bg-card2 text-text-dim border-b border-border font-bold">
+                  <tr>
+                    <th className="p-3.5">اسم الصنف</th>
+                    <th className="p-3.5">المجموعة</th>
+                    <th className="p-3.5 text-center bg-green-500/10 text-green-400">الكمية المباعة</th>
+                    <th className="p-3.5 text-center bg-green-500/10 text-green-400">إيراد المبيعات</th>
+                    <th className="p-3.5 text-center bg-green-500/10 text-green-400">متوسط سعر البيع</th>
+                    <th className="p-3.5 text-center bg-amber-500/10 text-amber-500">الكمية المشتراة</th>
+                    <th className="p-3.5 text-center bg-amber-500/10 text-amber-500">تكلفة المشتريات</th>
+                    <th className="p-3.5 text-center bg-amber-500/10 text-amber-500">متوسط سعر الشراء</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {advancedAnalytics.productsList.map((product, idx) => {
+                    const avgSellPrice = product.soldQty > 0 ? Math.round(product.salesRevenue / product.soldQty) : 0;
+                    const avgBuyPrice = product.purchasedQty > 0 ? Math.round(product.purchaseCost / product.purchasedQty) : 0;
+
+                    return (
+                      <tr key={product.id || idx} className="hover:bg-card2/50 transition-colors">
+                        <td className="p-3.5 font-bold text-text-main">{product.name}</td>
+                        <td className="p-3.5 text-text-dim">{product.category}</td>
+                        <td className="p-3.5 text-center font-bold text-text-main">{product.soldQty.toLocaleString('ar-EG')}</td>
+                        <td className="p-3.5 text-center font-bold text-green-400">{product.salesRevenue.toLocaleString('ar-EG')} ج.م</td>
+                        <td className="p-3.5 text-center font-mono text-text-dim">{avgSellPrice.toLocaleString('ar-EG')} ج.م</td>
+                        <td className="p-3.5 text-center font-bold text-text-main">{product.purchasedQty.toLocaleString('ar-EG')}</td>
+                        <td className="p-3.5 text-center font-bold text-amber-500">{product.purchaseCost.toLocaleString('ar-EG')} ج.م</td>
+                        <td className="p-3.5 text-center font-mono text-text-dim">{avgBuyPrice.toLocaleString('ar-EG')} ج.م</td>
+                      </tr>
+                    );
+                  })}
+                  {advancedAnalytics.productsList.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="p-8 text-center text-text-dim">
+                        لا توجد حركة مسجلة للأصناف في النطاق المحدد
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Income Statement (P&L) Printable Modal */}
       <IncomeStatementModal
         isOpen={isIncomeStatementOpen}
         onClose={() => setIsIncomeStatementOpen(false)}
         dateRangeLabel={dateRangeLabel}
         financials={{
-          grossSales: financialSummary.grossSales,
-          discounts: financialSummary.totalDiscount,
-          netSales: Math.max(0, financialSummary.grossSales - financialSummary.totalDiscount),
-          cogs: financialSummary.totalCogs,
-          grossProfit: financialSummary.grossProfit,
+          grossSales: financialSummary.grossSales || 0,
+          discounts: financialSummary.totalDiscount || 0,
+          netSales: Math.max(0, (financialSummary.grossSales || 0) - (financialSummary.totalDiscount || 0)),
+          cogs: financialSummary.totalCogs || 0,
+          grossProfit: financialSummary.grossProfit || 0,
           grossMargin: financialSummary.grossSales > 0 ? Math.round((financialSummary.grossProfit / financialSummary.grossSales) * 1000) / 10 : 0,
-          expensesList: expenseCategoriesData,
-          totalExpenses: financialSummary.totalExpenses,
-          operatingProfit: financialSummary.grossProfit - financialSummary.totalExpenses,
-          taxes: financialSummary.totalTaxCollected,
-          netProfit: financialSummary.netProfit,
-          netMargin: financialSummary.profitMargin
+          expensesList: expenseCategoriesData || [],
+          totalExpenses: financialSummary.totalExpenses || 0,
+          operatingProfit: (financialSummary.grossProfit || 0) - (financialSummary.totalExpenses || 0),
+          taxes: financialSummary.totalTaxCollected || 0,
+          netProfit: financialSummary.netProfit || 0,
+          netMargin: financialSummary.profitMargin || 0
         }}
       />
+
+      {/* Delete Sale Confirmation Modal */}
+      {saleToDelete && (
+        <div className="fixed inset-0 z-[9999] bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-fadeIn">
+          <div className="bg-card p-6 rounded-3xl w-full max-w-lg border border-red-500/40 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-danger/20 text-danger">
+                  <Trash2 size={20} />
+                </div>
+                <div>
+                  <h3 className="font-black text-base text-text-main">تأكيد حذف فاتورة المبيعات</h3>
+                  <p className="text-[11px] text-text-dim">إلغاء أثر الفاتورة واسترجاع الأصناف للمخزن</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setSaleToDelete(null)}
+                disabled={isDeletingSale}
+                className="text-text-dim hover:text-danger p-1 rounded-lg transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Invoice Details Card */}
+            <div className="bg-card2 p-4 rounded-2xl border border-border space-y-2 text-xs">
+              <div className="flex justify-between items-center">
+                <span className="text-text-dim font-bold">رقم الفاتورة:</span>
+                <span className="font-mono font-black text-text-main bg-card px-2 py-0.5 rounded-lg border border-border">
+                  #{saleToDelete.invoiceNumber || saleToDelete.id.slice(-8)}
+                </span>
+              </div>
+
+              <div className="flex justify-between items-center">
+                <span className="text-text-dim font-bold">العميل:</span>
+                <span className="font-bold text-text-main">{saleToDelete.customerName || 'عميل نقدي'}</span>
+              </div>
+
+              <div className="flex justify-between items-center">
+                <span className="text-text-dim font-bold">تاريخ المعاملة:</span>
+                <span className="text-text-main font-mono">{new Date(saleToDelete.date).toLocaleString('ar-EG')}</span>
+              </div>
+
+              <div className="flex justify-between items-center">
+                <span className="text-text-dim font-bold">إجمالي الفاتورة:</span>
+                <span className="font-black text-gold text-sm font-mono">{Number(saleToDelete.finalTotal || saleToDelete.total || 0).toLocaleString('ar-EG')} ج.م</span>
+              </div>
+
+              {saleToDelete.items && saleToDelete.items.length > 0 && (
+                <div className="mt-3 pt-2 border-t border-border">
+                  <span className="text-text-dim font-bold block mb-1.5">الأصناف التي سيتم إرجاع كمياتها للمخزن:</span>
+                  <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
+                    {saleToDelete.items.map((item, idx) => (
+                      <div key={idx} className="flex justify-between items-center text-[11px] bg-card p-1.5 rounded-lg border border-border">
+                        <span className="font-bold text-text-main">{item.name || item.productName || 'صنف'}</span>
+                        <span className="font-mono font-bold text-green-400">+{item.quantity} في المخزن</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Warning Box */}
+            <div className="bg-danger/10 border border-danger/30 p-3 rounded-2xl flex items-start gap-2.5 text-xs text-red-300">
+              <AlertTriangle className="text-danger shrink-0 mt-0.5" size={18} />
+              <div>
+                <strong className="block text-danger font-black mb-0.5">تنبيه محاسبي هام:</strong>
+                <span>
+                  عند تأكيد الحذف، سيتم إلغاء تأثير الفاتورة تماماً، وإعادة كميات الأصناف المباعة إلى أرصدة المخازن، وتعديل حساب العميل إن كانت الفاتورة آجلة.
+                </span>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={confirmDeleteSale}
+                disabled={isDeletingSale}
+                className="flex-1 bg-danger hover:bg-danger/90 text-white py-2.5 rounded-xl font-bold transition-all shadow-md active:scale-95 disabled:opacity-50 flex items-center justify-center gap-1.5"
+              >
+                {isDeletingSale ? (
+                  <>
+                    <RotateCcw className="animate-spin" size={16} />
+                    <span>جاري الحذف وتعديل المخزون...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={16} />
+                    <span>تأكيد الحذف النهائي</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSaleToDelete(null)}
+                disabled={isDeletingSale}
+                className="bg-card2 hover:bg-card border border-border text-text-dim hover:text-white px-4 py-2.5 rounded-xl font-bold transition-all"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* View Purchase Invoice Modal */}
+      {viewingPurchase && (
+        <div className="fixed inset-0 z-[9999] bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-fadeIn">
+          <div className="bg-card p-6 rounded-3xl w-full max-w-2xl border border-amber-500/40 space-y-4 shadow-2xl max-h-[90vh] flex flex-col">
+            {/* Header */}
+            <div className="flex justify-between items-center border-b border-border pb-3 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-500/20 text-amber-500">
+                  <Receipt size={22} />
+                </div>
+                <div>
+                  <h3 className="font-black text-base text-text-main flex items-center gap-2">
+                    <span>تفاصيل فاتورة المشتريات</span>
+                    <span className="font-mono text-xs text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded-lg border border-amber-500/20">
+                      #{viewingPurchase.purchaseNumber || `PUR-${viewingPurchase.id.slice(-6)}`}
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-text-dim">إذن استلام وتوريد بضائع للمخزن</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setViewingPurchase(null)}
+                className="text-text-dim hover:text-danger p-1 rounded-lg transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Info Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs shrink-0">
+              <div className="bg-card2 p-2.5 rounded-2xl border border-border">
+                <span className="text-text-dim block text-[10px] font-bold">المورد:</span>
+                <span className="font-bold text-text-main truncate block">{viewingPurchase.supplierName || 'مورد عام'}</span>
+              </div>
+              <div className="bg-card2 p-2.5 rounded-2xl border border-border">
+                <span className="text-text-dim block text-[10px] font-bold">رقم فاتورة المورد:</span>
+                <span className="font-mono font-bold text-text-main truncate block">{viewingPurchase.invoiceNumber || '-'}</span>
+              </div>
+              <div className="bg-card2 p-2.5 rounded-2xl border border-border">
+                <span className="text-text-dim block text-[10px] font-bold">تاريخ المعاملة:</span>
+                <span className="font-mono text-text-main truncate block">
+                  {viewingPurchase.date ? new Date(viewingPurchase.date).toLocaleDateString('ar-EG') : '-'}
+                </span>
+              </div>
+              <div className="bg-card2 p-2.5 rounded-2xl border border-border">
+                <span className="text-text-dim block text-[10px] font-bold">طريقة السداد:</span>
+                <span className={`font-bold text-[11px] ${
+                  viewingPurchase.paymentMethod === 'cash' ? 'text-green-400' : 'text-amber-400'
+                }`}>
+                  {viewingPurchase.paymentMethod === 'cash' ? 'نقدي (Cash)' :
+                   viewingPurchase.paymentMethod === 'deferred-full' ? 'آجل بالكامل' : 'سداد جزئي'}
+                </span>
+              </div>
+            </div>
+
+            {/* Items Table */}
+            <div className="overflow-y-auto flex-1 border border-border rounded-2xl">
+              <table className="w-full text-right text-xs">
+                <thead className="bg-card2 text-text-dim border-b border-border sticky top-0 font-bold">
+                  <tr>
+                    <th className="p-3">#</th>
+                    <th className="p-3">اسم الصنف</th>
+                    <th className="p-3 text-center">الوحدة</th>
+                    <th className="p-3 text-center">الكمية</th>
+                    <th className="p-3 text-center">سعر الشراء</th>
+                    <th className="p-3 text-left">الإجمالي</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {(viewingPurchase.items || []).map((item, idx) => {
+                    const buyPrice = Number(item.costPrice || item.buyPrice || item.price || 0);
+                    const qty = Number(item.quantity || 1);
+                    const subtotal = Number(item.total || (buyPrice * qty));
+
+                    return (
+                      <tr key={idx} className="hover:bg-card2/50">
+                        <td className="p-3 text-text-dim font-mono">{idx + 1}</td>
+                        <td className="p-3 font-bold text-text-main">{item.name || item.productName || 'صنف'}</td>
+                        <td className="p-3 text-center text-text-dim">{item.unit || 'قطعة'}</td>
+                        <td className="p-3 text-center font-bold font-mono text-text-main">
+                          <span className="bg-card2 px-2 py-0.5 rounded-md border border-border">{qty}</span>
+                        </td>
+                        <td className="p-3 text-center font-mono text-text-dim">{buyPrice.toLocaleString('ar-EG')} ج.م</td>
+                        <td className="p-3 text-left font-bold font-mono text-amber-500">{subtotal.toLocaleString('ar-EG')} ج.م</td>
+                      </tr>
+                    );
+                  })}
+                  {(!viewingPurchase.items || viewingPurchase.items.length === 0) && (
+                    <tr>
+                      <td colSpan={6} className="p-6 text-center text-text-dim text-xs">
+                        لا توجد بنود مسجلة في هذه الفاتورة
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Financial Summary & Notes */}
+            <div className="bg-card2 p-4 rounded-2xl border border-border space-y-2 text-xs shrink-0">
+              <div className="flex justify-between items-center">
+                <span className="text-text-dim">إجمالي الفاتورة:</span>
+                <span className="font-black text-amber-500 font-mono text-sm">
+                  {Number(viewingPurchase.total || 0).toLocaleString('ar-EG')} ج.م
+                </span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-text-dim">المبلغ المسدد للمورد:</span>
+                <span className="font-bold text-green-400 font-mono">
+                  {Number(viewingPurchase.paidAmount || (viewingPurchase.paymentMethod === 'cash' ? viewingPurchase.total : 0)).toLocaleString('ar-EG')} ج.م
+                </span>
+              </div>
+              {Number(viewingPurchase.total || 0) - Number(viewingPurchase.paidAmount || (viewingPurchase.paymentMethod === 'cash' ? viewingPurchase.total : 0)) > 0 && (
+                <div className="flex justify-between items-center text-danger font-bold">
+                  <span>المتبقي في حساب المورد (آجل):</span>
+                  <span className="font-mono">
+                    {(Number(viewingPurchase.total || 0) - Number(viewingPurchase.paidAmount || 0)).toLocaleString('ar-EG')} ج.م
+                  </span>
+                </div>
+              )}
+              {viewingPurchase.notes && (
+                <div className="pt-2 border-t border-border text-[11px] text-text-dim">
+                  <span className="font-bold text-text-main ml-1">ملاحظات:</span>
+                  <span>{viewingPurchase.notes}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div className="flex gap-2 pt-1 shrink-0">
+              <button
+                type="button"
+                onClick={() => setViewingPurchase(null)}
+                className="flex-1 bg-card2 hover:bg-card border border-border text-text-main py-2.5 rounded-xl font-bold transition-all text-xs"
+              >
+                إغلاق
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Purchase Confirmation Modal */}
+      {purchaseToDelete && (
+        <div className="fixed inset-0 z-[9999] bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-fadeIn">
+          <div className="bg-card p-6 rounded-3xl w-full max-w-lg border border-red-500/40 space-y-4 shadow-2xl">
+            <div className="flex justify-between items-center border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <div className="p-2 rounded-xl bg-danger/20 text-danger">
+                  <Trash2 size={20} />
+                </div>
+                <div>
+                  <h3 className="font-black text-base text-text-main">تأكيد حذف فاتورة المشتريات</h3>
+                  <p className="text-[11px] text-text-dim">إلغاء أثر الفاتورة وخصم الكميات من المخزن</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setPurchaseToDelete(null)}
+                disabled={isDeletingPurchase}
+                className="text-text-dim hover:text-danger p-1 rounded-lg transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Purchase Details Card */}
+            <div className="bg-card2 p-4 rounded-2xl border border-border space-y-2 text-xs">
+              <div className="flex justify-between items-center">
+                <span className="text-text-dim font-bold">رقم الفاتورة:</span>
+                <span className="font-mono font-black text-text-main bg-card px-2 py-0.5 rounded-lg border border-border">
+                  #{purchaseToDelete.purchaseNumber || `PUR-${purchaseToDelete.id.slice(-6)}`}
+                </span>
+              </div>
+
+              <div className="flex justify-between items-center">
+                <span className="text-text-dim font-bold">المورد:</span>
+                <span className="font-bold text-text-main">{purchaseToDelete.supplierName || 'مورد عام'}</span>
+              </div>
+
+              <div className="flex justify-between items-center">
+                <span className="text-text-dim font-bold">تاريخ المعاملة:</span>
+                <span className="text-text-main font-mono">
+                  {purchaseToDelete.date ? new Date(purchaseToDelete.date).toLocaleString('ar-EG') : '-'}
+                </span>
+              </div>
+
+              <div className="flex justify-between items-center">
+                <span className="text-text-dim font-bold">إجمالي الفاتورة:</span>
+                <span className="font-black text-amber-500 text-sm font-mono">
+                  {Number(purchaseToDelete.total || 0).toLocaleString('ar-EG')} ج.م
+                </span>
+              </div>
+
+              {purchaseToDelete.items && purchaseToDelete.items.length > 0 && (
+                <div className="mt-3 pt-2 border-t border-border">
+                  <span className="text-text-dim font-bold block mb-1.5">الأصناف التي سيتم خصم كمياتها من المخزن:</span>
+                  <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
+                    {purchaseToDelete.items.map((item, idx) => (
+                      <div key={idx} className="flex justify-between items-center text-[11px] bg-card p-1.5 rounded-lg border border-border">
+                        <span className="font-bold text-text-main">{item.name || item.productName || 'صنف'}</span>
+                        <span className="font-mono font-bold text-danger">-{item.quantity} من المخزن</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Warning Box */}
+            <div className="bg-danger/10 border border-danger/30 p-3 rounded-2xl flex items-start gap-2.5 text-xs text-red-300">
+              <AlertTriangle className="text-danger shrink-0 mt-0.5" size={18} />
+              <div>
+                <strong className="block text-danger font-black mb-0.5">تنبيه محاسبي هام:</strong>
+                <span>
+                  عند تأكيد الحذف، سيتم إلغاء تأثير الفاتورة تماماً، وخصم كميات الأصناف المشتراة من أرصدة المخازن، وتعديل حساب المورد إن كانت الفاتورة آجلة.
+                </span>
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={confirmDeletePurchase}
+                disabled={isDeletingPurchase}
+                className="flex-1 bg-danger hover:bg-danger/90 text-white py-2.5 rounded-xl font-bold transition-all shadow-md active:scale-95 disabled:opacity-50 flex items-center justify-center gap-1.5"
+              >
+                {isDeletingPurchase ? (
+                  <>
+                    <RotateCcw className="animate-spin" size={16} />
+                    <span>جاري الحذف وتعديل المخزون...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={16} />
+                    <span>تأكيد الحذف النهائي</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setPurchaseToDelete(null)}
+                disabled={isDeletingPurchase}
+                className="bg-card2 hover:bg-card border border-border text-text-dim hover:text-white px-4 py-2.5 rounded-xl font-bold transition-all"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toast Notification */}
+      {toast && (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast(null)}
+        />
+      )}
     </div>
   );
 }

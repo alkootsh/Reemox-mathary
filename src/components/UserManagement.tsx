@@ -1,11 +1,14 @@
 import React, { useState, useEffect } from 'react';
 import { AppUser, UserRole } from '../types/types';
 import { getUsers, saveUser, deleteUser } from '../lib/firestoreService';
+import { getTreasuries, getWarehouses, Treasury, Warehouse } from '../lib/treasuryWarehouseService';
 import Toast from './Toast';
 import { playSuccessSound, playWarningSound } from '../lib/sound';
 
 export default function UserManagement() {
   const [users, setUsers] = useState<AppUser[]>([]);
+  const [treasuries, setTreasuries] = useState<Treasury[]>([]);
+  const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'warning' } | null>(null);
 
@@ -15,6 +18,9 @@ export default function UserManagement() {
   const [username, setUsername] = useState('');
   const [pin, setPin] = useState('');
   const [role, setRole] = useState<UserRole>('cashier');
+  const [cashierType, setCashierType] = useState<'retail' | 'wholesale'>('retail');
+  const [selectedTreasuryId, setSelectedTreasuryId] = useState<string>('treasury-main');
+  const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>('wh-main');
   const [phone, setPhone] = useState('');
   const [canEditPrice, setCanEditPrice] = useState<boolean>(true);
 
@@ -23,6 +29,8 @@ export default function UserManagement() {
 
   useEffect(() => {
     loadUsers();
+    setTreasuries(getTreasuries());
+    setWarehouses(getWarehouses());
   }, []);
 
   const loadUsers = async () => {
@@ -56,11 +64,19 @@ export default function UserManagement() {
     }
 
     try {
+      const selectedTreasuryObj = treasuries.find(t => t.id === selectedTreasuryId);
+      const selectedWarehouseObj = warehouses.find(w => w.id === selectedWarehouseId);
+
       const userData: Partial<AppUser> = {
         name: name.trim(),
         username: username.trim().toLowerCase(),
         pin: pin.trim(),
         role,
+        cashierType,
+        treasuryId: selectedTreasuryId,
+        treasuryName: selectedTreasuryObj?.name || 'الخزنة الرئيسية',
+        warehouseId: selectedWarehouseId,
+        warehouseName: selectedWarehouseObj?.name || 'المخزن الرئيسي',
         phone: phone.trim(),
         canEditPrice: role === 'admin' ? true : canEditPrice
       };
@@ -103,6 +119,9 @@ export default function UserManagement() {
     setUsername(user.username);
     setPin(user.pin);
     setRole(user.role);
+    setCashierType(user.cashierType || 'retail');
+    setSelectedTreasuryId(user.treasuryId || 'treasury-main');
+    setSelectedWarehouseId(user.warehouseId || 'wh-main');
     setPhone(user.phone || '');
     setCanEditPrice(user.role === 'admin' ? true : (user.canEditPrice !== false));
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -136,6 +155,9 @@ export default function UserManagement() {
     setUsername('');
     setPin('');
     setRole('cashier');
+    setCashierType('retail');
+    setSelectedTreasuryId('treasury-main');
+    setSelectedWarehouseId('wh-main');
     setPhone('');
     setCanEditPrice(true);
   };
@@ -193,7 +215,7 @@ export default function UserManagement() {
               type="text"
               placeholder="مثال: أحمد عبد الله (كاشير)"
               className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm"
-              value={name}
+              value={name || ''}
               onChange={e => setName(e.target.value)}
               required
             />
@@ -205,7 +227,7 @@ export default function UserManagement() {
               type="text"
               placeholder="مثال: ahmed_pos أو cashier1"
               className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm"
-              value={username}
+              value={username || ''}
               onChange={e => setUsername(e.target.value)}
               required
             />
@@ -217,7 +239,7 @@ export default function UserManagement() {
               type="password"
               placeholder="مثال: 1234 أو 0000"
               className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm"
-              value={pin}
+              value={pin || ''}
               onChange={e => setPin(e.target.value)}
               required
             />
@@ -227,13 +249,63 @@ export default function UserManagement() {
             <label className="block text-xs font-bold mb-1.5">الدور والصلاحية: *</label>
             <select
               className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm font-bold"
-              value={role}
+              value={role || 'cashier'}
               onChange={e => setRole(e.target.value as UserRole)}
             >
               <option value="cashier">كاشير (يفتح أساسي على شاشة البيع فقط)</option>
               <option value="admin">مدير النظام (كامل الصلاحيات والتعديل والحذف)</option>
               <option value="accountant">محاسب (تقارير مالية، صندوق، ومصروفات)</option>
               <option value="inventory_manager">أمين مخزن (إدارة المخزون، الحركات، الموردين)</option>
+            </select>
+          </div>
+          
+          <div>
+            <label className="block text-xs font-bold mb-1.5">نوع الكاشير/التسعير:</label>
+            <select
+              className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm font-bold"
+              value={cashierType}
+              onChange={e => setCashierType(e.target.value as 'retail' | 'wholesale')}
+            >
+              <option value="retail">تجزئة (البيع بسعر التجزئة الافتراضي)</option>
+              <option value="wholesale">جملة (البيع بسعر الجملة الافتراضي)</option>
+            </select>
+          </div>
+
+          {/* Treasury Selection */}
+          <div>
+            <label className="block text-xs font-bold mb-1.5 text-gold flex items-center gap-1">
+              <span>🏦</span>
+              <span>الخزنة المربوطة المخصصة:</span>
+            </label>
+            <select
+              className="w-full bg-card2 border border-gold/40 p-3 rounded-2xl text-sm font-bold text-text-main focus:border-gold focus:outline-none"
+              value={selectedTreasuryId}
+              onChange={e => setSelectedTreasuryId(e.target.value)}
+            >
+              {treasuries.map(t => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Warehouse Selection */}
+          <div>
+            <label className="block text-xs font-bold mb-1.5 text-emerald-400 flex items-center gap-1">
+              <span>🏬</span>
+              <span>المخزن المربوط المخصص:</span>
+            </label>
+            <select
+              className="w-full bg-card2 border border-emerald-500/40 p-3 rounded-2xl text-sm font-bold text-text-main focus:border-emerald-500 focus:outline-none"
+              value={selectedWarehouseId}
+              onChange={e => setSelectedWarehouseId(e.target.value)}
+            >
+              {warehouses.map(w => (
+                <option key={w.id} value={w.id}>
+                  {w.name} {w.location ? `(${w.location})` : ''}
+                </option>
+              ))}
             </select>
           </div>
 
@@ -243,7 +315,7 @@ export default function UserManagement() {
               type="text"
               placeholder="مثال: 01012345678"
               className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm"
-              value={phone}
+              value={phone || ''}
               onChange={e => setPhone(e.target.value)}
             />
           </div>
@@ -307,6 +379,12 @@ export default function UserManagement() {
                   {getRoleBadge(u.role)}
                   <span className="text-xs text-text-dim bg-card2 px-2 py-0.5 rounded-md border border-border">
                     🔑 رمز المرور: •••• ({u.pin})
+                  </span>
+                  <span className="text-xs font-bold text-gold bg-gold/10 border border-gold/30 px-2 py-0.5 rounded-md flex items-center gap-1">
+                    <span>🏦</span> {u.treasuryName || 'الخزنة الرئيسية'}
+                  </span>
+                  <span className="text-xs font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 px-2 py-0.5 rounded-md flex items-center gap-1">
+                    <span>🏬</span> {u.warehouseName || 'المخزن الرئيسي'}
                   </span>
                   {u.phone && (
                     <span className="text-xs text-text-dim">📱 {u.phone}</span>

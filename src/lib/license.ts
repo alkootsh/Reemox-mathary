@@ -136,7 +136,7 @@ export function getTrialStatus(): TrialStatus {
   
   // Check if activated
   const isMasterKey = savedKey === MASTER_UNIVERSAL_KEY || savedKey === MASTER_DEV_KEY;
-  const isSimpleMachineKey = savedKey === `KEY-${machineId}` || savedKey === `MARO-${machineId}` || savedKey === `KEY-${machineId.toUpperCase()}`;
+  const isSimpleMachineKey = false; // Deprecated plain spoofable keys for high security
   
   // Check cryptographic hash key (PRO-HASH-MACHINEID)
   const expectedHash = calculateLicenseHash(machineId);
@@ -145,6 +145,8 @@ export function getTrialStatus(): TrialStatus {
   // Check timed subscription key: EXP-YYYYMMDD-HASH-MACHINEID
   let isTimedValid = false;
   let timedExpiryStr = '';
+  let timedDaysRemaining = 9999;
+  let timedHoursRemaining = 99999;
   if (savedKey.startsWith('EXP-')) {
     const parts = savedKey.split('-');
     if (parts.length >= 4) {
@@ -160,6 +162,10 @@ export function getTrialStatus(): TrialStatus {
           const day = parseInt(expiryDateStr.substring(6, 8), 10);
           const expiryDate = new Date(year, month, day, 23, 59, 59);
           timedExpiryStr = expiryDate.toISOString().split('T')[0];
+          
+          const diffTimedMs = expiryDate.getTime() - new Date().getTime();
+          timedDaysRemaining = Math.max(0, Math.ceil(diffTimedMs / (24 * 60 * 60 * 1000)));
+          timedHoursRemaining = Math.max(0, Math.ceil(diffTimedMs / (60 * 60 * 1000)));
           
           if (new Date().getTime() <= expiryDate.getTime()) {
             isTimedValid = true;
@@ -196,14 +202,22 @@ export function getTrialStatus(): TrialStatus {
     else licenseType = 'lifetime_pro';
   }
 
+  const actualDays = isMasterKey || isSimpleMachineKey || isCryptoKey 
+    ? 9999 
+    : (isTimedValid ? timedDaysRemaining : daysRemaining);
+
+  const actualHours = isMasterKey || isSimpleMachineKey || isCryptoKey 
+    ? 99999 
+    : (isTimedValid ? timedHoursRemaining : hoursRemaining);
+
   return {
     machineId,
     isActivated,
     activationDate: localStorage.getItem('activationDate') || undefined,
     trialStartDate: startStr,
     trialTotalDays: TRIAL_DAYS,
-    daysRemaining: isActivated ? 9999 : daysRemaining,
-    hoursRemaining: isActivated ? 99999 : hoursRemaining,
+    daysRemaining: actualDays,
+    hoursRemaining: actualHours,
     isExpired,
     licenseType,
     expiryDate: timedExpiryStr || undefined,
@@ -212,20 +226,19 @@ export function getTrialStatus(): TrialStatus {
 }
 
 /**
- * Generates standard Lifetime Key
+ * Generates standard Lifetime Key (now cryptographically signed for absolute security)
  */
 export function generateActivationKey(targetMachineId: string): string {
   const cleanId = targetMachineId.trim().toUpperCase();
-  return `KEY-${cleanId}`;
+  const hash = calculateLicenseHash(cleanId);
+  return `PRO-${hash}-${cleanId}`;
 }
 
 /**
  * Generates Cryptographically Signed Lifetime Pro Key
  */
 export function generateSignedProKey(targetMachineId: string): string {
-  const cleanId = targetMachineId.trim().toUpperCase();
-  const hash = calculateLicenseHash(cleanId);
-  return `PRO-${hash}-${cleanId}`;
+  return generateActivationKey(targetMachineId);
 }
 
 /**
@@ -258,17 +271,24 @@ export function activateWithKey(inputKey: string): { success: boolean; message: 
     return { success: false, message: 'يرجى إدخال كود التفعيل أولاً!' };
   }
 
+  // Reject insecure/legacy plain keys explicitly
+  if (key.toUpperCase().startsWith('KEY-') || key.toUpperCase().startsWith('MARO-')) {
+    const isSigned = key.toUpperCase().startsWith('PRO-') || key.toUpperCase().startsWith('EXP-');
+    if (!isSigned) {
+      return { 
+        success: false, 
+        message: '❌ عذراً، الأكواد غير المشفرة (KEY-) لم تعد مدعومة لدواعي الأمان ومكافحة التلاعب بالنظام! يرجى التواصل مع الإدارة للحصول على كود PRO جديد وموقع تشفيرياً.' 
+      };
+    }
+  }
+
   // Acceptable keys
   const expectedHash = calculateLicenseHash(machineId);
   const validDirectKeys = [
-    `KEY-${machineId}`,
-    `KEY-${machineId.toUpperCase()}`,
-    `MARO-${machineId}`,
     `PRO-${expectedHash}-${machineId}`,
     `PRO-${expectedHash}-${machineId.toUpperCase()}`,
     MASTER_UNIVERSAL_KEY,
-    MASTER_DEV_KEY,
-    'MARO-LIFETIME-PRO'
+    MASTER_DEV_KEY
   ];
 
   if (validDirectKeys.some(k => k.toLowerCase() === key.toLowerCase())) {

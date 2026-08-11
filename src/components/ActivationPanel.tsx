@@ -127,20 +127,30 @@ export default function ActivationPanel() {
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-3 border-b border-border pb-4">
         <div>
           <div className="flex items-center gap-2">
-            <span className="text-2xl">{trial.isActivated ? '👑' : '⏳'}</span>
+            <span className="text-2xl">
+              {trial.licenseType === 'timed_subscription' ? '⏱️' : (trial.isActivated ? '👑' : '⏳')}
+            </span>
             <h3 className="text-lg font-black text-gold">
-              {trial.isActivated ? 'النظام مفعل ومرخص مدى الحياة' : 'حالة ترخيص النظام والنسخة التجريبية (14 يوم)'}
+              {trial.licenseType === 'timed_subscription' 
+                ? `النظام مفعل باشتراك مؤقت (ينتهي في: ${trial.expiryDate ? new Date(trial.expiryDate).toLocaleDateString('ar-EG') : ''})`
+                : (trial.isActivated ? 'النظام مفعل ومرخص مدى الحياة' : 'حالة ترخيص النظام والنسخة التجريبية (14 يوم)')}
             </h3>
           </div>
           <p className="text-xs text-text-dim mt-1">
-            {trial.isActivated 
-              ? 'النسخة التجارية الكاملة مفعلة بدون أي قيود زمنية أو حظر.' 
-              : 'يعمل النظام حالياً في الفترة التجريبية المجانية الكاملة لمدة 14 يوماً.'}
+            {trial.licenseType === 'timed_subscription'
+              ? `النسخة التجارية الكاملة مفعلة بموجب اشتراك مؤقت متبقي فيه ${trial.daysRemaining} يوم.`
+              : (trial.isActivated 
+                ? 'النسخة التجارية الكاملة مفعلة بدون أي قيود زمنية أو حظر.' 
+                : 'يعمل النظام حالياً في الفترة التجريبية المجانية الكاملة لمدة 14 يوماً.')}
           </p>
         </div>
 
         <div>
-          {trial.isActivated ? (
+          {trial.licenseType === 'timed_subscription' ? (
+            <span className="bg-blue-500/20 text-blue-400 border border-blue-500/30 px-3.5 py-1.5 rounded-full text-xs font-black flex items-center gap-1.5 shadow-sm">
+              <span>⏱️</span> اشتراك مؤقت: متبقي {trial.daysRemaining} يوم
+            </span>
+          ) : trial.isActivated ? (
             <span className="bg-green-500/20 text-green-400 border border-green-500/30 px-3.5 py-1.5 rounded-full text-xs font-black flex items-center gap-1.5 shadow-sm">
               <span>✅</span> مرخص دائم مدى الحياة (PRO)
             </span>

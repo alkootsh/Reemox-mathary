@@ -1,24 +1,34 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Product, Category, Branch } from '@/src/types/types';
 import { db } from '@/src/lib/firebase';
-import { Camera, X, MessageSquare, Mail, AlertTriangle, Send } from 'lucide-react';
+import { Camera, X, MessageSquare, Mail, AlertTriangle, Send, Scale, Sliders, Table as TableIcon, LayoutGrid, Check, Edit3, Trash2 } from 'lucide-react';
 import QrScanner from 'react-qr-scanner';
-import { collection, getDocs, addDoc, updateDoc, doc } from 'firebase/firestore';
+import { getProducts, saveProduct, deleteProduct, getUnits, DEFAULT_UNITS, UnitItem, getUserPreferences } from '@/src/lib/firestoreService';
 import { logActivity } from '@/src/lib/activity';
 import Toast from './Toast';
 import InventoryCount from './InventoryCount';
+import UnitsModal from './UnitsModal';
+import ColumnManagerModal from './ColumnManagerModal';
+import { PRODUCTS_COLUMNS, PRODUCTS_DEFAULT_VISIBLE } from '@/src/lib/columns';
 import { playAlertSound } from '@/src/lib/audio';
 import { playSuccessSound, playWarningSound } from '@/src/lib/sound';
 import { triggerLowStockAlert, getNotificationConfig, buildBulkLowStockMessage, openDirectWhatsAppChat } from '@/src/lib/notifications';
 import jsPDF from 'jspdf';
+import { useTenant } from '../context/TenantContext';
 
 export default function Inventory({ categories, branches }: { categories: Category[], branches: Branch[] }) {
+  const { companyId, currentUser } = useTenant();
   const [products, setProducts] = useState<Product[]>([]);
+  const [barcodesList, setBarcodesList] = useState<string[]>([]);
+  const [tempBarcode, setTempBarcode] = useState('');
   const [newProduct, setNewProduct] = useState({ 
     name: '', 
     sku: '', 
     serial: '', 
-    price: '', 
+    price: '', // Retail
+    wholesalePrice: '',
+    halfWholesalePrice: '',
+    minPrice: '',
     cost: '',
     quantity: '', 
     openingStock: '',
@@ -33,8 +43,14 @@ export default function Inventory({ categories, branches }: { categories: Catego
     isPharmacy: false,
     stripsPerBox: '',
     stripPrice: '',
-    stripBarcode: ''
+    stripBarcode: '',
+    isWeighted: false,
+    weightUnit: 'kg' as 'kg' | 'g',
+    unit: 'قطعة',
+    multiUnits: [] as any[]
   });
+  const [customUnits, setCustomUnits] = useState<UnitItem[]>([]);
+  const [isUnitsModalOpen, setIsUnitsModalOpen] = useState(false);
   const [filterCategory, setFilterCategory] = useState<string>('');
   const [filterSubcategory, setFilterSubcategory] = useState<string>('');
   const [filterBranch, setFilterBranch] = useState<string>('');
@@ -46,6 +62,13 @@ export default function Inventory({ categories, branches }: { categories: Catego
   const [selectedProducts, setSelectedProducts] = useState<Set<string>>(new Set());
   const [showLowStockModal, setShowLowStockModal] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+
+  // Column Customization & View Mode
+  const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
+  const [visibleKeys, setVisibleKeys] = useState<string[]>(PRODUCTS_DEFAULT_VISIBLE);
+  const [orderedKeys, setOrderedKeys] = useState<string[]>(() => PRODUCTS_COLUMNS.map(c => c.key));
+  const [showColModal, setShowColModal] = useState<boolean>(false);
   
   const toggleProductSelection = (productId: string) => {
       const newSelection = new Set(selectedProducts);
@@ -67,15 +90,43 @@ export default function Inventory({ categories, branches }: { categories: Catego
       doc.save(`barcodes.pdf`);
   };
 
-  
   useEffect(() => {
     const fetchProducts = async () => {
-      const querySnapshot = await getDocs(collection(db, 'products'));
-      const productsData = querySnapshot.docs.map(doc => ({ ...doc.data(), id: doc.id } as Product));
+      const productsData = await getProducts(companyId);
       setProducts(productsData);
+      try {
+        const unitsData = await getUnits(companyId);
+        setCustomUnits(unitsData);
+      } catch (e) {
+        console.warn('Error loading units:', e);
+      }
     };
     fetchProducts();
-  }, []);
+    loadPrefs();
+  }, [companyId]);
+
+  const loadPrefs = async () => {
+    try {
+      const userEmail = currentUser?.email || currentUser?.username || 'admin';
+      const prefs = await getUserPreferences(userEmail, 'products');
+      if (prefs && prefs.visible && prefs.order) {
+        setVisibleKeys(prefs.visible);
+        setOrderedKeys(prefs.order);
+      }
+    } catch (err) {
+      console.warn('Failed to load products preferences', err);
+    }
+  };
+
+  const allUnitsList = useMemo(() => {
+    const list = [...DEFAULT_UNITS];
+    customUnits.forEach(u => {
+      if (u.name && !list.includes(u.name)) {
+        list.push(u.name);
+      }
+    });
+    return list;
+  }, [customUnits]);
 
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -97,8 +148,12 @@ export default function Inventory({ categories, branches }: { categories: Catego
       const productData: any = {
         name: newProduct.name,
         sku: newProduct.sku,
+        barcodes: barcodesList,
         serial: newProduct.serial || null,
         price: parseFloat(newProduct.price),
+        wholesalePrice: newProduct.wholesalePrice ? parseFloat(newProduct.wholesalePrice) : 0,
+        halfWholesalePrice: newProduct.halfWholesalePrice ? parseFloat(newProduct.halfWholesalePrice) : 0,
+        minPrice: newProduct.minPrice ? parseFloat(newProduct.minPrice) : 0,
         cost: initialCost,
         quantity: initialQty,
         openingStock: initialQty,
@@ -114,37 +169,26 @@ export default function Inventory({ categories, branches }: { categories: Catego
         stripsPerBox: stripsCount || null,
         stripPrice: stripSellPrice || null,
         stripBarcode: newProduct.stripBarcode || null,
+        isWeighted: newProduct.isWeighted,
+        weightUnit: newProduct.weightUnit,
+        multiUnits: newProduct.multiUnits,
         createdAt: new Date().toISOString()
       };
       
-      const docRef = await addDoc(collection(db, 'products'), productData);
+      const savedId = await saveProduct(productData, companyId);
       
-      // If opening stock is provided, log movement
-      if (initialQty > 0) {
-        await addDoc(collection(db, 'inventory_movements'), {
-          productId: docRef.id,
-          productName: newProduct.name,
-          branchId: newProduct.branchId || 'default',
-          movementType: 'OPENING_BALANCE',
-          quantity: initialQty,
-          unitCost: initialCost,
-          stockBefore: 0,
-          stockAfter: initialQty,
-          referenceType: 'ADJUSTMENT',
-          referenceId: 'OPENING-STOCK',
-          userId: 'admin',
-          createdAt: new Date().toISOString(),
-          notes: 'تسجيل رصيد وتكلفة أول المدة عند إنشاء الصنف'
-        });
-      }
-
-      setProducts([...products, { ...productData, id: docRef.id } as Product]);
+      setProducts([...products, { ...productData, id: savedId } as Product]);
       logActivity(`تم إضافة منتج جديد ورصيد أول مدة: ${newProduct.name}`);
+      setBarcodesList([]);
+      setTempBarcode('');
       setNewProduct({ 
         name: '', 
         sku: '', 
         serial: '', 
         price: '', 
+        wholesalePrice: '',
+        halfWholesalePrice: '',
+        minPrice: '',
         cost: '',
         quantity: '', 
         openingStock: '',
@@ -159,7 +203,10 @@ export default function Inventory({ categories, branches }: { categories: Catego
         isPharmacy: false,
         stripsPerBox: '',
         stripPrice: '',
-        stripBarcode: ''
+        stripBarcode: '',
+        isWeighted: false,
+        weightUnit: 'kg',
+        multiUnits: []
       });
       alert('تم حفظ المنتج ورصيد أول المدة وبيانات الوحدات بنجاح!');
     } catch (err: any) {
@@ -175,11 +222,19 @@ export default function Inventory({ categories, branches }: { categories: Catego
     const product = products.find(p => p.id === id);
     if (!product) return;
 
-    const newQuantity = Math.max(0, product.quantity + delta);
+    const reason = prompt(`أدخل سبب تعديل كمية الصنف "${product.name}" (الكمية الحالية: ${product.quantity}):`, 'تعديل يدوي للمخزن');
+    if (reason === null) return; // cancelled
+
+    const oldQty = product.quantity;
+    const newQuantity = Math.max(0, oldQty + delta);
     const threshold = product.lowStockThreshold ?? 5;
     
-    await updateDoc(doc(db, 'products', id), { quantity: newQuantity });
-    logActivity(`تم تحديث كمية ${product.name} إلى ${newQuantity}`);
+    await saveProduct({ id, quantity: newQuantity }, companyId);
+    
+    const empName = currentUser?.name || currentUser?.username || 'المسؤول';
+    const timeStr = new Date().toLocaleString('ar-EG');
+    const logText = `[تعديل مخزون يدوي] التاريخ: ${timeStr} | المسؤول: ${empName} | الصنف: ${product.name} | الكمية القديمة: ${oldQty} -> الجديدة: ${newQuantity} | السبب: ${reason || 'بدون سبب'}`;
+    logActivity(logText);
     
     // Notify if it just crossed the threshold
     if (newQuantity <= threshold && product.quantity > threshold) {
@@ -209,7 +264,7 @@ export default function Inventory({ categories, branches }: { categories: Catego
 
     if (Object.keys(updateData).length === 0) return;
     
-    await updateDoc(doc(db, 'products', id), updateData);
+    await saveProduct({ id, ...updateData }, companyId);
     const product = products.find(p => p.id === id);
     logActivity(`تم تحديث أسعار ${product?.name}`);
     
@@ -345,7 +400,7 @@ export default function Inventory({ categories, branches }: { categories: Catego
                   <input 
                     placeholder="مثال: بنادول إكسترا 500 ملجم / شاي العروسة" 
                     className="bg-card2 border border-border p-3 rounded-2xl w-full text-sm font-bold text-text-main focus:border-gold focus:outline-none" 
-                    value={newProduct.name} 
+                    value={newProduct.name || ''} 
                     onChange={e => setNewProduct({...newProduct, name: e.target.value})} 
                   />
                 </div>
@@ -355,13 +410,108 @@ export default function Inventory({ categories, branches }: { categories: Catego
                     <input 
                       placeholder="SKU / Barcode" 
                       className="bg-card2 border border-border p-3 rounded-2xl w-full text-sm font-mono text-text-main focus:border-gold focus:outline-none" 
-                      value={newProduct.sku} 
+                      value={newProduct.sku || ''} 
                       onChange={e => setNewProduct({...newProduct, sku: e.target.value})} 
                     />
                     <button type="button" onClick={() => setIsScanning(true)} className='p-3 bg-accent rounded-2xl text-white hover:opacity-90'>
                       <Camera size={18} />
                     </button>
                   </div>
+                </div>
+              </div>
+
+              {/* Multiple Barcodes Manager */}
+              <div className="bg-card2/30 p-4 rounded-2xl border border-border space-y-3">
+                <label className="text-xs font-bold text-text-dim block mb-1">الباركودات الإضافية للصنف (لربط أكثر من باركود بنفس المنتج)</label>
+                <div className="flex gap-2">
+                  <input 
+                    type="text"
+                    placeholder="أدخل الباركود الإضافي واضغط إضافة..." 
+                    className="bg-card2 border border-border p-3 rounded-2xl flex-grow text-sm font-mono text-text-main focus:border-gold focus:outline-none" 
+                    value={tempBarcode} 
+                    onChange={e => setTempBarcode(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        if (tempBarcode.trim() && !barcodesList.includes(tempBarcode.trim())) {
+                          setBarcodesList([...barcodesList, tempBarcode.trim()]);
+                          setTempBarcode('');
+                        }
+                      }
+                    }}
+                  />
+                  <button 
+                    type="button" 
+                    onClick={() => {
+                      if (tempBarcode.trim() && !barcodesList.includes(tempBarcode.trim())) {
+                        setBarcodesList([...barcodesList, tempBarcode.trim()]);
+                        setTempBarcode('');
+                      }
+                    }} 
+                    className="bg-gold hover:bg-gold2 text-white px-5 rounded-2xl font-bold text-xs"
+                  >
+                    إضافة ➕
+                  </button>
+                </div>
+                {barcodesList.length > 0 && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {barcodesList.map((bc, idx) => (
+                      <span key={idx} className="bg-gold/15 text-gold border border-gold/30 px-3 py-1 rounded-full text-xs font-mono flex items-center gap-1.5 shadow-sm">
+                        <span>{bc}</span>
+                        <button 
+                          type="button" 
+                          onClick={() => setBarcodesList(barcodesList.filter(item => item !== bc))} 
+                          className="text-red-400 hover:text-red-500 font-bold ml-1 text-sm leading-none"
+                          title="حذف"
+                        >
+                          &times;
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Unit Selector (الوحدة الأساسية) */}
+              <div className="bg-card2/80 p-3.5 rounded-2xl border border-border space-y-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-xs font-bold text-text-main flex items-center gap-1.5">
+                    <Scale size={14} className="text-gold" />
+                    <span>وحدة القياس الأساسية للمنتج (Unit of Measure)</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setIsUnitsModalOpen(true)}
+                    className="text-xs text-gold hover:text-gold2 font-bold flex items-center gap-1 hover:underline"
+                  >
+                    <span>⚙️ دليل وتحديد الوحدات</span>
+                  </button>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {allUnitsList.slice(0, 14).map((u, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setNewProduct({ ...newProduct, unit: u })}
+                      className={`px-3 py-1 rounded-xl text-xs font-bold transition-all ${
+                        newProduct.unit === u
+                          ? 'bg-gold text-white shadow-sm scale-105'
+                          : 'bg-card text-text-main hover:bg-gold/20 hover:text-gold border border-border'
+                      }`}
+                    >
+                      {u}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    type="text"
+                    placeholder="أو اكتب وحدة قياس مخصصة"
+                    className="bg-card border border-border p-2 rounded-xl text-xs flex-1 font-bold text-text-main focus:border-gold focus:outline-none"
+                    value={newProduct.unit}
+                    onChange={e => setNewProduct({ ...newProduct, unit: e.target.value })}
+                  />
+                  <span className="text-xs text-text-dim font-bold">الوحدة المختارة: <b className="text-gold">{newProduct.unit || 'غير محددة'}</b></span>
                 </div>
               </div>
 
@@ -373,8 +523,38 @@ export default function Inventory({ categories, branches }: { categories: Catego
                     type="number" 
                     placeholder="0.00" 
                     className="bg-card2 border border-border p-2.5 rounded-xl w-full text-sm font-bold font-mono text-text-main focus:border-gold focus:outline-none" 
-                    value={newProduct.price} 
+                    value={newProduct.price || ''} 
                     onChange={e => setNewProduct({...newProduct, price: e.target.value})} 
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-text-dim block mb-1">سعر الجملة</label>
+                  <input 
+                    type="number" 
+                    placeholder="0.00" 
+                    className="bg-card2 border border-border p-2.5 rounded-xl w-full text-sm font-bold font-mono text-text-main focus:border-gold focus:outline-none" 
+                    value={newProduct.wholesalePrice || ''} 
+                    onChange={e => setNewProduct({...newProduct, wholesalePrice: e.target.value})} 
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-text-dim block mb-1">سعر نصف الجملة</label>
+                  <input 
+                    type="number" 
+                    placeholder="0.00" 
+                    className="bg-card2 border border-border p-2.5 rounded-xl w-full text-sm font-bold font-mono text-text-main focus:border-gold focus:outline-none" 
+                    value={newProduct.halfWholesalePrice || ''} 
+                    onChange={e => setNewProduct({...newProduct, halfWholesalePrice: e.target.value})} 
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-bold text-text-dim block mb-1">أقل سعر بيع مسموح</label>
+                  <input 
+                    type="number" 
+                    placeholder="0.00" 
+                    className="bg-card2 border border-border p-2.5 rounded-xl w-full text-sm font-bold font-mono text-text-main focus:border-gold focus:outline-none" 
+                    value={newProduct.minPrice || ''} 
+                    onChange={e => setNewProduct({...newProduct, minPrice: e.target.value})} 
                   />
                 </div>
                 <div>
@@ -383,7 +563,7 @@ export default function Inventory({ categories, branches }: { categories: Catego
                     type="number" 
                     placeholder="0.00" 
                     className="bg-card2 border border-border p-2.5 rounded-xl w-full text-sm font-bold font-mono text-text-main focus:border-gold focus:outline-none" 
-                    value={newProduct.cost} 
+                    value={newProduct.cost || ''} 
                     onChange={e => setNewProduct({...newProduct, cost: e.target.value, openingCost: e.target.value})} 
                   />
                 </div>
@@ -393,7 +573,7 @@ export default function Inventory({ categories, branches }: { categories: Catego
                     type="number" 
                     placeholder="0" 
                     className="bg-card2 border border-gold/40 p-2.5 rounded-xl w-full text-sm font-black font-mono text-gold focus:border-gold focus:outline-none" 
-                    value={newProduct.quantity} 
+                    value={newProduct.quantity || ''} 
                     onChange={e => setNewProduct({...newProduct, quantity: e.target.value, openingStock: e.target.value})} 
                   />
                 </div>
@@ -403,29 +583,61 @@ export default function Inventory({ categories, branches }: { categories: Catego
                     type="number" 
                     placeholder="5" 
                     className="bg-card2 border border-border p-2.5 rounded-xl w-full text-sm font-mono text-text-main focus:border-gold focus:outline-none" 
-                    value={newProduct.lowStockThreshold} 
+                    value={newProduct.lowStockThreshold || ''} 
                     onChange={e => setNewProduct({...newProduct, lowStockThreshold: e.target.value})} 
                   />
                 </div>
               </div>
 
-              {/* Multi-Units & Pharmacy Features */}
-              <div className="bg-accent/5 p-4 rounded-2xl border border-accent/20 space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="flex items-center gap-2 cursor-pointer">
+              {/* Features: Pharmacy, Weighted, Multi-Units */}
+              <div className="bg-accent/5 p-4 rounded-2xl border border-accent/20 space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Pharmacy Flag */}
+                  <div className="flex items-start gap-2">
                     <input 
                       type="checkbox" 
+                      id="isPharmacyCheck"
                       checked={newProduct.isPharmacy} 
                       onChange={e => setNewProduct({...newProduct, isPharmacy: e.target.checked})}
-                      className="rounded accent-gold w-4 h-4"
+                      className="mt-1 rounded accent-gold w-4 h-4 cursor-pointer"
                     />
-                    <span className="text-sm font-bold text-text-main">صنف صيدلية / تجزئة وحدات (بيع بالعلبة والشريط والقرص) 💊</span>
-                  </label>
-                  <span className="text-[11px] text-text-dim">خصم كسرى تلقائي عند بيع الشريط</span>
+                    <div>
+                      <label htmlFor="isPharmacyCheck" className="text-sm font-bold text-text-main cursor-pointer block">صنف صيدلية (بيع بالعلبة والشريط) 💊</label>
+                      <span className="text-[11px] text-text-dim block mt-0.5">خصم كسرى تلقائي عند بيع الشريط</span>
+                    </div>
+                  </div>
+
+                  {/* Weighted Flag */}
+                  <div className="flex items-start gap-2">
+                    <input 
+                      type="checkbox" 
+                      id="isWeightedCheck"
+                      checked={newProduct.isWeighted} 
+                      onChange={e => setNewProduct({...newProduct, isWeighted: e.target.checked})}
+                      className="mt-1 rounded accent-gold w-4 h-4 cursor-pointer"
+                    />
+                    <div>
+                      <label htmlFor="isWeightedCheck" className="text-sm font-bold text-text-main cursor-pointer block">صنف ميزان ⚖️</label>
+                      <span className="text-[11px] text-text-dim block mt-0.5">يطلب تأكيد الوزن أو السعر عند الإضافة للفاتورة</span>
+                      
+                      {newProduct.isWeighted && (
+                        <div className="mt-2">
+                           <select 
+                             className="bg-card2 border border-border p-2 rounded-xl text-xs"
+                             value={newProduct.weightUnit}
+                             onChange={e => setNewProduct({...newProduct, weightUnit: e.target.value as 'kg' | 'g'})}
+                           >
+                              <option value="kg">كيلوجرام (KG)</option>
+                              <option value="g">جرام (G)</option>
+                           </select>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 </div>
 
                 {newProduct.isPharmacy && (
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-border/50">
                     <div>
                       <label className="text-xs font-bold text-text-dim block mb-1">عدد الأشرطة بالعلبة (Strips/Box)</label>
                       <input 
@@ -458,6 +670,110 @@ export default function Inventory({ categories, branches }: { categories: Catego
                     </div>
                   </div>
                 )}
+                
+                {/* Multi-Units (Generic) */}
+                <div className="pt-2 border-t border-border/50">
+                  <div className="flex justify-between items-center mb-2">
+                    <label className="text-xs font-bold text-text-main block">تعدد الوحدات (مثال: كرتونة تحتوي 12 علبة)</label>
+                    <button 
+                      type="button"
+                      onClick={() => {
+                        const newUnits = [...newProduct.multiUnits, { name: '', conversionFactor: 1, price: 0, barcode: '' }];
+                        setNewProduct({...newProduct, multiUnits: newUnits});
+                      }}
+                      className="text-xs bg-gold hover:bg-gold2 text-white px-2 py-1 rounded-lg font-bold"
+                    >
+                      + إضافة وحدة كبرى
+                    </button>
+                  </div>
+                  {newProduct.multiUnits.length > 0 && (
+                    <div className="space-y-3">
+                      {newProduct.multiUnits.map((u, idx) => (
+                        <div key={idx} className="bg-card2 p-3 rounded-2xl border border-border space-y-2">
+                          <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+                            <span className="text-[10px] font-bold text-text-dim whitespace-nowrap">اختر اسم الوحدة:</span>
+                            {['كرتونة', 'طرد', 'دستة', 'شريط', 'علبة', 'شيكارة', 'صندوق', 'درزن', 'طقم', 'لفة'].map((preset, pIdx) => (
+                              <button
+                                key={pIdx}
+                                type="button"
+                                onClick={() => {
+                                  const arr = [...newProduct.multiUnits];
+                                  arr[idx].name = preset;
+                                  setNewProduct({...newProduct, multiUnits: arr});
+                                }}
+                                className={`px-2 py-0.5 rounded-lg text-[11px] font-bold transition-all whitespace-nowrap ${
+                                  u.name === preset 
+                                    ? 'bg-gold text-white shadow-sm' 
+                                    : 'bg-card hover:bg-gold/20 text-text-dim hover:text-gold border border-border'
+                                }`}
+                              >
+                                {preset}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="flex flex-wrap sm:flex-nowrap gap-2 items-center">
+                            <input 
+                              placeholder="اسم الوحدة (مثال: كرتونة)" 
+                              className="bg-card border border-border p-2 rounded-lg text-xs flex-1 font-bold text-text-main focus:border-gold focus:outline-none"
+                              value={u.name}
+                              onChange={(e) => {
+                                const arr = [...newProduct.multiUnits];
+                                arr[idx].name = e.target.value;
+                                setNewProduct({...newProduct, multiUnits: arr});
+                              }}
+                            />
+                            <input 
+                              type="number" 
+                              placeholder="تحتوي كام وحدة أساسية؟" 
+                              className="bg-card border border-border p-2 rounded-lg text-xs w-32 font-bold font-mono text-text-main focus:border-gold focus:outline-none"
+                              value={u.conversionFactor || ''}
+                              onChange={(e) => {
+                                const arr = [...newProduct.multiUnits];
+                                arr[idx].conversionFactor = parseFloat(e.target.value);
+                                setNewProduct({...newProduct, multiUnits: arr});
+                              }}
+                              title="معامل التحويل (مثال: 12 علبة)"
+                            />
+                            <input 
+                              type="number" 
+                              placeholder="السعر للوحدة الكبرى" 
+                              className="bg-card border border-border p-2 rounded-lg text-xs w-32 font-bold font-mono text-text-main focus:border-gold focus:outline-none"
+                              value={u.price || ''}
+                              onChange={(e) => {
+                                const arr = [...newProduct.multiUnits];
+                                arr[idx].price = parseFloat(e.target.value);
+                                setNewProduct({...newProduct, multiUnits: arr});
+                              }}
+                            />
+                            <input 
+                              placeholder="باركود الوحدة الكبرى" 
+                              className="bg-card border border-border p-2 rounded-lg text-xs flex-1 font-mono text-text-main focus:border-gold focus:outline-none"
+                              value={u.barcode || ''}
+                              onChange={(e) => {
+                                const arr = [...newProduct.multiUnits];
+                                arr[idx].barcode = e.target.value;
+                                setNewProduct({...newProduct, multiUnits: arr});
+                              }}
+                            />
+                            <button 
+                              type="button" 
+                              onClick={() => {
+                                const arr = [...newProduct.multiUnits];
+                                arr.splice(idx, 1);
+                                setNewProduct({...newProduct, multiUnits: arr});
+                              }}
+                              className="text-red-400 p-2 font-bold hover:bg-red-500/10 rounded-lg transition-colors"
+                              title="حذف هذه الوحدة"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
               </div>
 
               {/* Expiration & Batch Lot Tracking */}
@@ -511,27 +827,87 @@ export default function Inventory({ categories, branches }: { categories: Catego
               </button>
             </div>
 
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-bold">{showArchived ? 'المنتجات المؤرشفة' : 'المخزون المتوفر'}</h2>
-              <button onClick={() => setShowArchived(!showArchived)} className={`px-4 py-2 rounded-2xl text-sm font-bold ${showArchived ? 'bg-gold text-white' : 'bg-card2 border border-border'}`}>
-                {showArchived ? 'عرض المخزون الحالي' : 'عرض المنتجات المؤرشفة'}
-              </button>
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4">
+              <div>
+                <h2 className="text-xl font-bold text-text-main">{showArchived ? 'المنتجات المؤرشفة' : 'المخزون المتوفر'}</h2>
+                <p className="text-xs text-text-dim mt-0.5">إدارة ومتابعة أصناف المخزون والأسعار والكميات المتاحة</p>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto">
+                <div className="flex items-center bg-card2 p-1 rounded-xl border border-border">
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('table')}
+                    className={`p-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${viewMode === 'table' ? 'bg-gold text-white shadow' : 'text-text-dim hover:text-white'}`}
+                    title="عرض الجدول"
+                  >
+                    <TableIcon size={14} />
+                    <span className="hidden sm:inline">جدول</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setViewMode('cards')}
+                    className={`p-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${viewMode === 'cards' ? 'bg-gold text-white shadow' : 'text-text-dim hover:text-white'}`}
+                    title="عرض البطاقات"
+                  >
+                    <LayoutGrid size={14} />
+                    <span className="hidden sm:inline">بطاقات</span>
+                  </button>
+                </div>
+
+                {viewMode === 'table' && (
+                  <button
+                    type="button"
+                    onClick={() => setShowColModal(true)}
+                    className="bg-card border border-border hover:border-gold px-3 py-2 rounded-xl text-xs font-bold text-text-main transition-all flex items-center gap-1.5 shadow-sm"
+                    title="تخصيص أعمدة جدول المخزون"
+                  >
+                    <Sliders size={14} className="text-gold" />
+                    <span>تخصيص الأعمدة</span>
+                  </button>
+                )}
+
+                <button onClick={() => setShowArchived(!showArchived)} className={`px-4 py-2 rounded-2xl text-xs font-bold transition-all ${showArchived ? 'bg-gold text-white' : 'bg-card2 border border-border text-text-dim hover:text-white'}`}>
+                  {showArchived ? 'عرض المخزون الحالي' : 'عرض المؤرشفة'}
+                </button>
+              </div>
             </div>
-            <div className='flex gap-2 mb-2'>
-                <input type="text" placeholder="بحث عن منتج (اسم أو SKU)..." className="w-full bg-card2 border border-border p-3 rounded-2xl" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+
+            {/* Column Manager Modal */}
+            {showColModal && (
+              <ColumnManagerModal
+                tableName="products"
+                allColumns={PRODUCTS_COLUMNS}
+                defaultVisibleKeys={PRODUCTS_DEFAULT_VISIBLE}
+                currentVisibleKeys={visibleKeys}
+                currentOrderedKeys={orderedKeys}
+                onSave={(vis, ord) => {
+                  setVisibleKeys(vis);
+                  setOrderedKeys(ord);
+                }}
+                onClose={() => setShowColModal(false)}
+              />
+            )}
+
+            <div className='flex flex-col sm:flex-row gap-2 mb-3'>
+                <input type="text" placeholder="بحث عن منتج (اسم أو SKU أو باركود)..." className="w-full bg-card2 border border-border p-3 rounded-2xl text-xs text-text-main focus:outline-none focus:border-gold" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
                 {!showArchived && (
-                  <button onClick={printSelectedBarcodes} disabled={selectedProducts.size === 0} className='bg-gold text-white p-3 rounded-2xl whitespace-nowrap disabled:bg-gray-400'>طباعة المختار ({selectedProducts.size})</button>
+                  <button onClick={printSelectedBarcodes} disabled={selectedProducts.size === 0} className='bg-gold hover:bg-gold2 text-white p-3 rounded-2xl whitespace-nowrap disabled:bg-gray-400 text-xs font-bold shadow transition-all'>طباعة الباركود للمختار ({selectedProducts.size})</button>
                 )}
             </div>
-            <select className="w-full bg-card2 border border-border p-2 rounded-xl mb-4" value={filterCategory} onChange={e => setFilterCategory(e.target.value)}>
-              <option value="">جميع التصنيفات الرئيسية</option>
-              {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
-            </select>
-            <input placeholder="تصفية بالتصنيف الفرعي..." className="w-full bg-card2 border border-border p-3 rounded-2xl mb-4" value={filterSubcategory} onChange={e => setFilterSubcategory(e.target.value)} />
-            <select className="w-full bg-card2 border border-border p-2 rounded-xl mb-4" value={filterBranch} onChange={e => setFilterBranch(e.target.value)}>
-              <option value="">جميع الفروع</option>
-              {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-            </select>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-4">
+              <select className="w-full bg-card2 border border-border p-2.5 rounded-xl text-xs text-text-main focus:border-gold focus:outline-none" value={filterCategory} onChange={e => setFilterCategory(e.target.value)}>
+                <option value="">جميع التصنيفات الرئيسية</option>
+                {categories.map(c => <option key={c.id} value={c.name}>{c.name}</option>)}
+              </select>
+              <input placeholder="تصفية بالتصنيف الفرعي..." className="w-full bg-card2 border border-border p-2.5 rounded-xl text-xs text-text-main focus:border-gold focus:outline-none" value={filterSubcategory} onChange={e => setFilterSubcategory(e.target.value)} />
+              <select className="w-full bg-card2 border border-border p-2.5 rounded-xl text-xs text-text-main focus:border-gold focus:outline-none" value={filterBranch} onChange={e => setFilterBranch(e.target.value)}>
+                <option value="">جميع الفروع</option>
+                {branches.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+              </select>
+            </div>
+
             {isScanning && (
                   <div className='fixed inset-0 z-[9999] bg-black/85 flex items-center justify-center p-4 backdrop-blur-md animate-fadeIn'>
                       <div className='bg-card p-4 rounded-3xl w-full max-w-sm border border-border shadow-2xl'>
@@ -553,6 +929,233 @@ export default function Inventory({ categories, branches }: { categories: Catego
               )}
               
             {toastMessage && <Toast message={toastMessage} onClose={() => setToastMessage(null)} />}
+
+            {viewMode === 'table' ? (
+              <div className="overflow-x-auto rounded-2xl border border-border bg-card mb-20">
+                <table className="w-full text-right text-xs">
+                  <thead className="bg-card2 border-b border-border text-text-dim font-bold">
+                    <tr>
+                      {!showArchived && (
+                        <th className="p-3 w-8 text-center">
+                          <input 
+                            type="checkbox" 
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                const filtered = products.filter(p => (!filterCategory || p.category === filterCategory) && (!filterSubcategory || p.subcategory?.includes(filterSubcategory)) && (!filterBranch || p.branchId === filterBranch) && (showArchived ? p.archived : !p.archived) && (p.name.includes(searchTerm) || p.sku.toLowerCase().includes(searchTerm.toLowerCase())));
+                                setSelectedProducts(new Set(filtered.map(p => p.id)));
+                              } else {
+                                setSelectedProducts(new Set());
+                              }
+                            }}
+                            checked={products.length > 0 && selectedProducts.size === products.filter(p => !p.archived).length}
+                          />
+                        </th>
+                      )}
+                      {orderedKeys.map(colKey => {
+                        if (!visibleKeys.includes(colKey)) return null;
+                        const colDef = PRODUCTS_COLUMNS.find(c => c.key === colKey);
+                        return (
+                          <th key={colKey} className={`p-3 ${colKey === 'cost' || colKey === 'price' || colKey === 'wholesalePrice' || colKey === 'stock' || colKey === 'totalCostValue' || colKey === 'totalSaleValue' || colKey === 'status' || colKey === 'actions' ? 'text-center' : ''}`}>
+                            {colDef?.label}
+                          </th>
+                        );
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border">
+                    {products.filter(p => (!filterCategory || p.category === filterCategory) && (!filterSubcategory || p.subcategory?.includes(filterSubcategory)) && (!filterBranch || p.branchId === filterBranch) && (showArchived ? p.archived : !p.archived) && (p.name.includes(searchTerm) || p.sku.toLowerCase().includes(searchTerm.toLowerCase()))).map(product => {
+                      const threshold = product.lowStockThreshold ?? 5;
+                      const isLowStock = product.quantity <= threshold;
+                      const isOutStock = product.quantity <= 0;
+                      const totalCost = (Number(product.cost) || 0) * (Number(product.quantity) || 0);
+                      const totalSale = (Number(product.price) || 0) * (Number(product.quantity) || 0);
+
+                      return (
+                        <tr key={product.id} className="hover:bg-card2/50 transition-colors">
+                          {!showArchived && (
+                            <td className="p-3 text-center">
+                              <input type="checkbox" checked={selectedProducts.has(product.id)} onChange={() => toggleProductSelection(product.id)} />
+                            </td>
+                          )}
+                          {orderedKeys.map(colKey => {
+                            if (!visibleKeys.includes(colKey)) return null;
+                            switch (colKey) {
+                              case 'sku':
+                                return (
+                                  <td key={colKey} className="p-3 font-mono text-[11px] text-gold font-bold">
+                                    {product.sku}
+                                    {product.barcodes && product.barcodes.length > 0 && (
+                                      <span className="block text-[9px] text-text-dim font-normal">+{product.barcodes.length} باركود</span>
+                                    )}
+                                  </td>
+                                );
+                              case 'name':
+                                return (
+                                  <td key={colKey} className="p-3 font-bold text-text-main">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span>{product.name}</span>
+                                      {product.isPharmacy && (
+                                        <span className="bg-purple-500/10 text-purple-400 border border-purple-500/20 text-[9px] font-bold px-1.5 py-0.5 rounded">
+                                          💊 صيدلية
+                                        </span>
+                                      )}
+                                    </div>
+                                    {product.expirationDate && (
+                                      <span className="block text-[10px] text-text-dim mt-0.5">
+                                        الصلاحية: {product.expirationDate}
+                                      </span>
+                                    )}
+                                  </td>
+                                );
+                              case 'category':
+                                return (
+                                  <td key={colKey} className="p-3 text-text-dim text-xs">
+                                    <span>{product.category || '-'}</span>
+                                    {product.subcategory && <span className="block text-[10px] text-text-dim/70">/ {product.subcategory}</span>}
+                                  </td>
+                                );
+                              case 'cost':
+                                return (
+                                  <td key={colKey} className="p-3 text-center font-mono font-bold text-text-main text-xs">
+                                    {(Number(product.cost) || 0).toLocaleString()} ج.م
+                                  </td>
+                                );
+                              case 'price':
+                                return (
+                                  <td key={colKey} className="p-3 text-center font-mono font-black text-gold text-xs">
+                                    {(Number(product.price) || 0).toLocaleString()} ج.م
+                                  </td>
+                                );
+                              case 'wholesalePrice':
+                                return (
+                                  <td key={colKey} className="p-3 text-center font-mono text-text-dim text-xs">
+                                    {product.wholesalePrice ? `${Number(product.wholesalePrice).toLocaleString()} ج.م` : '-'}
+                                  </td>
+                                );
+                              case 'stock':
+                                return (
+                                  <td key={colKey} className="p-3 text-center">
+                                    <div className="flex items-center justify-center gap-1.5">
+                                      <span className={`font-mono font-black text-sm ${isOutStock ? 'text-danger' : isLowStock ? 'text-gold' : 'text-success'}`}>
+                                        {product.quantity}
+                                      </span>
+                                      {!showArchived && (
+                                        <div className="flex flex-col gap-0.5">
+                                          <button onClick={() => updateQuantity(product.id, 1)} className="bg-card2 hover:bg-card border border-border rounded px-1 text-[10px] leading-tight">+</button>
+                                          <button onClick={() => updateQuantity(product.id, -1)} className="bg-card2 hover:bg-card border border-border rounded px-1 text-[10px] leading-tight">-</button>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </td>
+                                );
+                              case 'minStock':
+                                return (
+                                  <td key={colKey} className="p-3 text-center font-mono text-text-dim text-xs">
+                                    {threshold}
+                                  </td>
+                                );
+                              case 'unit':
+                                return (
+                                  <td key={colKey} className="p-3 text-center text-text-dim text-xs">
+                                    {product.unit || 'قطعة'}
+                                  </td>
+                                );
+                              case 'totalCostValue':
+                                return (
+                                  <td key={colKey} className="p-3 text-center font-mono text-xs text-text-dim">
+                                    {totalCost.toLocaleString()} ج.م
+                                  </td>
+                                );
+                              case 'totalSaleValue':
+                                return (
+                                  <td key={colKey} className="p-3 text-center font-mono font-bold text-xs text-emerald-400">
+                                    {totalSale.toLocaleString()} ج.م
+                                  </td>
+                                );
+                              case 'status':
+                                return (
+                                  <td key={colKey} className="p-3 text-center">
+                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                      isOutStock 
+                                        ? 'bg-danger/10 text-danger border border-danger/20' 
+                                        : isLowStock 
+                                        ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20' 
+                                        : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                    }`}>
+                                      {isOutStock ? 'نفد' : isLowStock ? 'منخفض' : 'متوفر'}
+                                    </span>
+                                  </td>
+                                );
+                              case 'actions':
+                                return (
+                                  <td key={colKey} className="p-3 text-center">
+                                    <div className="flex items-center justify-center gap-1">
+                                      {showArchived ? (
+                                        <button onClick={async () => {
+                                            await saveProduct({ id: product.id, archived: false }, companyId);
+                                            setProducts(products.map(p => p.id === product.id ? {...p, archived: false} : p));
+                                            logActivity(`استرجاع منتج: ${product.name}`);
+                                            setToastMessage(`تم استرجاع المنتج ${product.name} بنجاح`);
+                                        }} className='bg-success text-white rounded-lg px-2 py-1 text-[11px] font-bold'>استرجاع</button>
+                                      ) : (
+                                        <>
+                                          <button onClick={async () => {
+                                              await saveProduct({ id: product.id, archived: true }, companyId);
+                                              setProducts(products.map(p => p.id === product.id ? {...p, archived: true} : p));
+                                              logActivity(`أرشفة منتج: ${product.name}`);
+                                              setToastMessage(`تم أرشفة المنتج ${product.name}`);
+                                          }} className='bg-amber-500/10 text-amber-500 border border-amber-500/30 hover:bg-amber-500 hover:text-white rounded-lg px-2 py-1 text-[11px] font-bold transition-all'>أرشفة</button>
+
+                                          {deleteConfirmId === product.id ? (
+                                            <div className="flex items-center gap-0.5 bg-danger/20 border border-danger p-0.5 rounded-lg">
+                                              <button
+                                                onClick={async () => {
+                                                  try {
+                                                    await deleteProduct(product.id, companyId);
+                                                    setProducts(products.filter(p => p.id !== product.id));
+                                                    logActivity(`حذف منتج نهائياً: ${product.name}`);
+                                                    setToastMessage(`تم حذف المنتج "${product.name}" نهائياً`);
+                                                    setDeleteConfirmId(null);
+                                                  } catch (err: any) {
+                                                    alert(`فشل حذف المنتج: ${err?.message || 'خطأ غير معروف'}`);
+                                                  }
+                                                }}
+                                                className="bg-danger text-white text-[10px] px-1.5 py-0.5 rounded font-bold"
+                                              >
+                                                تأكيد
+                                              </button>
+                                              <button
+                                                onClick={() => setDeleteConfirmId(null)}
+                                                className="bg-card2 text-[10px] px-1.5 py-0.5 rounded font-bold text-text-dim"
+                                              >
+                                                إلغاء
+                                              </button>
+                                            </div>
+                                          ) : (
+                                            <button 
+                                              onClick={() => setDeleteConfirmId(product.id)} 
+                                              className='bg-danger/10 text-danger border border-danger/30 hover:bg-danger hover:text-white rounded-lg p-1 text-[11px] font-bold transition-all'
+                                              title="حذف نهائي"
+                                            >
+                                              <Trash2 size={12} />
+                                            </button>
+                                          )}
+                                        </>
+                                      )}
+                                    </div>
+                                  </td>
+                                );
+                              default:
+                                return null;
+                            }
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
             <div className="space-y-3 pb-20">
               {products.filter(p => (!filterCategory || p.category === filterCategory) && (!filterSubcategory || p.subcategory?.includes(filterSubcategory)) && (!filterBranch || p.branchId === filterBranch) && (showArchived ? p.archived : !p.archived) && (p.name.includes(searchTerm) || p.sku.toLowerCase().includes(searchTerm.toLowerCase()))).map(product => {
                 const threshold = product.lowStockThreshold ?? 5;
@@ -577,6 +1180,19 @@ export default function Inventory({ categories, branches }: { categories: Catego
                           {product.batchNumber && <span>التشغيلة: <strong className="text-gold font-mono">{product.batchNumber}</strong></span>}
                           {product.serial && <span>S/N: {product.serial}</span>}
                         </div>
+
+                        {product.barcodes && product.barcodes.length > 0 && (
+                          <div className="text-[11px] text-text-dim flex items-center gap-1.5 mt-1 flex-wrap">
+                            <span>الباركودات الإضافية:</span>
+                            <div className="flex flex-wrap gap-1">
+                              {product.barcodes.map((bc, idx) => (
+                                <span key={idx} className="bg-card2 border border-border px-1.5 py-0.5 rounded font-mono text-text-main text-[10px]">
+                                  {bc}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
 
                         {/* Pharmacy Multi-units info */}
                         {product.stripsPerBox && product.stripsPerBox > 1 && (
@@ -626,18 +1242,54 @@ export default function Inventory({ categories, branches }: { categories: Catego
                         )}
                         {showArchived ? (
                           <button onClick={async () => {
-                              await updateDoc(doc(db, 'products', product.id), { archived: false });
+                              await saveProduct({ id: product.id, archived: false }, companyId);
                               setProducts(products.map(p => p.id === product.id ? {...p, archived: false} : p));
                               logActivity(`استرجاع منتج: ${product.name}`);
                               setToastMessage(`تم استرجاع المنتج ${product.name} بنجاح`);
                           }} className='bg-success text-white rounded-full px-3 py-2 text-xs font-bold'>استرجاع</button>
                         ) : (
-                          <button onClick={async () => {
-                              await updateDoc(doc(db, 'products', product.id), { archived: true });
-                              setProducts(products.map(p => p.id === product.id ? {...p, archived: true} : p));
-                              logActivity(`أرشفة منتج: ${product.name}`);
-                              setToastMessage(`تم أرشفة المنتج ${product.name}`);
-                          }} className='bg-danger text-white rounded-full p-2 text-xs'>أرشفة</button>
+                          <div className="flex items-center gap-1.5">
+                            <button onClick={async () => {
+                                await saveProduct({ id: product.id, archived: true }, companyId);
+                                setProducts(products.map(p => p.id === product.id ? {...p, archived: true} : p));
+                                logActivity(`أرشفة منتج: ${product.name}`);
+                                setToastMessage(`تم أرشفة المنتج ${product.name}`);
+                            }} className='bg-amber-500/10 text-amber-500 border border-amber-500/30 hover:bg-amber-500 hover:text-white rounded-xl px-2.5 py-1 text-xs font-bold transition-all'>أرشفة</button>
+
+                            {deleteConfirmId === product.id ? (
+                              <div className="flex items-center gap-1 bg-danger/20 border border-danger p-1 rounded-xl">
+                                <button
+                                  onClick={async () => {
+                                    try {
+                                      await deleteProduct(product.id, companyId);
+                                      setProducts(products.filter(p => p.id !== product.id));
+                                      logActivity(`حذف منتج نهائياً: ${product.name}`);
+                                      setToastMessage(`تم حذف المنتج "${product.name}" نهائياً`);
+                                      setDeleteConfirmId(null);
+                                    } catch (err: any) {
+                                      alert(`فشل حذف المنتج: ${err?.message || 'خطأ غير معروف'}`);
+                                    }
+                                  }}
+                                  className="bg-danger text-white text-[11px] px-2.5 py-1 rounded-lg font-bold"
+                                >
+                                  تأكيد
+                                </button>
+                                <button
+                                  onClick={() => setDeleteConfirmId(null)}
+                                  className="bg-card2 text-[11px] px-2 py-1 rounded-lg font-bold text-text-dim"
+                                >
+                                  إلغاء
+                                </button>
+                              </div>
+                            ) : (
+                              <button 
+                                onClick={() => setDeleteConfirmId(product.id)} 
+                                className='bg-danger/10 text-danger border border-danger/30 hover:bg-danger hover:text-white rounded-xl px-2.5 py-1 text-xs font-bold transition-all'
+                              >
+                                حذف
+                              </button>
+                            )}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -683,10 +1335,18 @@ export default function Inventory({ categories, branches }: { categories: Catego
                 );
               })}
             </div>
+            )}
         </>
       ) : (
         <InventoryCount products={products} setProducts={setProducts} categories={categories} />
       )}
+
+      {/* Units Manager Modal */}
+      <UnitsModal
+        isOpen={isUnitsModalOpen}
+        onClose={() => setIsUnitsModalOpen(false)}
+        onUnitAdded={(u) => setNewProduct(prev => ({ ...prev, unit: u }))}
+      />
     </div>
   );
 }

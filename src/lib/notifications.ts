@@ -388,3 +388,203 @@ export async function triggerLowStockAlert(product: {
     serverResult: serverRes,
   };
 }
+
+/**
+ * Trigger Sale Invoice Notification (WhatsApp & Email)
+ */
+export async function triggerSaleNotification(sale: any): Promise<{
+  directWhatsAppUrl: string;
+  serverResult?: { success: boolean; whatsapp: boolean; email: boolean; message: string };
+}> {
+  const config = getNotificationConfig();
+  const storeName = config.businessName || localStorage.getItem('businessName') || 'نظام المبيعات والمخزون';
+  const time = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+  const date = new Date().toLocaleDateString('ar-EG');
+
+  const itemsCount = sale.items ? sale.items.length : 0;
+  const itemsText = sale.items && sale.items.length > 0 
+    ? sale.items.slice(0, 5).map((item: any, idx: number) => `${idx + 1}. *${item.name || item.productName || 'صنف'}* × ${item.quantity} = ${item.price ? (item.price * item.quantity).toFixed(2) : ''} ج.م`).join('\n')
+    : '';
+
+  const totalAmount = (sale.finalTotal || sale.total || 0).toFixed(2);
+  const paidAmount = sale.paidAmount !== undefined ? Number(sale.paidAmount).toFixed(2) : totalAmount;
+  const invNumber = sale.invoiceNumber || sale.id || 'INV-NEW';
+  const customerName = sale.customerName || 'عميل نقدي';
+
+  const message = `🧾 *تنبيه: فاتورة مبيعات جديدة*
+🏪 *المنشأة:* ${storeName}
+🆔 *رقم الفاتورة:* ${invNumber}
+👤 *العميل:* ${customerName}
+📅 *التاريخ والوقت:* ${date} - ${time}
+
+💰 *إجمالي الفاتورة:* ${totalAmount} ج.م
+💵 *المبلغ المدفوع:* ${paidAmount} ج.م
+💳 *طريقة السداد:* ${sale.paymentMethod || 'كاش'}
+📦 *عدد البنود:* ${itemsCount}
+
+${itemsText ? `📋 *أبرز البنود:*\n${itemsText}\n` : ''}
+✅ تم تسجيل الفاتورة بنجاح وخصم كمياتها من المخزون آلياً.`;
+
+  const directUrl = getDirectWhatsAppUrl(config.managerPhone, message, config.countryCode);
+
+  let serverRes;
+  if (config.managerPhone || config.managerEmail) {
+    serverRes = await sendServerNotification({
+      phone: config.managerPhone,
+      email: config.managerEmail,
+      subject: `🧾 فاتورة مبيعات جديدة #${invNumber} - ${totalAmount} ج.م`,
+      message: message,
+    });
+  }
+
+  // Dispatch custom browser event
+  window.dispatchEvent(
+    new CustomEvent('managerAlertTriggered', {
+      detail: {
+        type: 'sale',
+        title: `🧾 فاتورة مبيعات جديدة: ${totalAmount} ج.م`,
+        message,
+        directUrl,
+        sale,
+      },
+    })
+  );
+
+  return { directWhatsAppUrl: directUrl, serverResult: serverRes };
+}
+
+/**
+ * Trigger Purchase Invoice Notification (WhatsApp & Email)
+ */
+export async function triggerPurchaseNotification(purchase: any): Promise<{
+  directWhatsAppUrl: string;
+  serverResult?: { success: boolean; whatsapp: boolean; email: boolean; message: string };
+}> {
+  const config = getNotificationConfig();
+  const storeName = config.businessName || localStorage.getItem('businessName') || 'نظام المبيعات والمخزون';
+  const time = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+  const date = new Date().toLocaleDateString('ar-EG');
+
+  const supplierName = purchase.supplierName || 'مورد عام';
+  const totalAmount = (purchase.total || 0).toFixed(2);
+  const pNum = purchase.invoiceNumber || purchase.purchaseNumber || purchase.id || 'PUR-NEW';
+
+  const message = `🚚 *تنبيه: فاتورة مشتريات جديدة*
+🏪 *المنشأة:* ${storeName}
+🆔 *رقم الفاتورة:* ${pNum}
+🏭 *المورد:* ${supplierName}
+📅 *التاريخ والوقت:* ${date} - ${time}
+
+💰 *الإجمالي:* ${totalAmount} ج.م
+💵 *المدفوع للمورد:* ${(purchase.paidAmount || 0).toFixed(2)} ج.م
+💳 *طريقة السداد:* ${purchase.paymentMethod || 'نقداً'}
+📦 *عدد البنود:* ${purchase.items ? purchase.items.length : 0}
+
+✅ تم تعزيز أرصدة الأصناف بالمخزون وتحديث حساب المورد.`;
+
+  const directUrl = getDirectWhatsAppUrl(config.managerPhone, message, config.countryCode);
+
+  let serverRes;
+  if (config.managerPhone || config.managerEmail) {
+    serverRes = await sendServerNotification({
+      phone: config.managerPhone,
+      email: config.managerEmail,
+      subject: `🚚 فاتورة مشتريات جديدة #${pNum} - ${supplierName}`,
+      message: message,
+    });
+  }
+
+  window.dispatchEvent(
+    new CustomEvent('managerAlertTriggered', {
+      detail: {
+        type: 'purchase',
+        title: `🚚 فاتورة مشتريات جديدة: ${supplierName}`,
+        message,
+        directUrl,
+        purchase,
+      },
+    })
+  );
+
+  return { directWhatsAppUrl: directUrl, serverResult: serverRes };
+}
+
+/**
+ * Trigger User Login Notification (WhatsApp & Email)
+ */
+export async function triggerLoginNotification(user: any): Promise<{
+  directWhatsAppUrl: string;
+  serverResult?: { success: boolean; whatsapp: boolean; email: boolean; message: string };
+}> {
+  const config = getNotificationConfig();
+  const storeName = config.businessName || localStorage.getItem('businessName') || 'نظام المبيعات والمخزون';
+  const time = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+  const date = new Date().toLocaleDateString('ar-EG');
+
+  const userName = user.name || user.username || 'موظف';
+  const userRole = user.role === 'admin' ? 'مدير عام' : user.role === 'cashier' ? 'كاشير' : user.role === 'accountant' ? 'محاسب' : 'مستخدم';
+
+  const message = `🔑 *تنبيه: تسجيل دخول جديد إلى النظام*
+🏪 *المنشأة:* ${storeName}
+👤 *المستخدم / الموظف:* ${userName}
+🏷️ *الصلاحية:* ${userRole}
+📅 *التاريخ:* ${date}
+⏰ *الوقت:* ${time}
+
+🔓 تم بدء جلسة العمل بنجاح عبر النظام المحاسبي.`;
+
+  const directUrl = getDirectWhatsAppUrl(config.managerPhone, message, config.countryCode);
+
+  let serverRes;
+  if (config.managerPhone || config.managerEmail) {
+    serverRes = await sendServerNotification({
+      phone: config.managerPhone,
+      email: config.managerEmail,
+      subject: `🔑 تسجيل دخول جديد: ${userName} (${userRole})`,
+      message: message,
+    });
+  }
+
+  return { directWhatsAppUrl: directUrl, serverResult: serverRes };
+}
+
+/**
+ * Trigger Expense Notification (WhatsApp & Email)
+ */
+export async function triggerExpenseNotification(expense: any): Promise<{
+  directWhatsAppUrl: string;
+  serverResult?: { success: boolean; whatsapp: boolean; email: boolean; message: string };
+}> {
+  const config = getNotificationConfig();
+  const storeName = config.businessName || localStorage.getItem('businessName') || 'نظام المبيعات والمخزون';
+  const time = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
+  const date = new Date().toLocaleDateString('ar-EG');
+
+  const category = expense.category || 'مصروف عام';
+  const amount = Number(expense.amount || 0).toFixed(2);
+  const notes = expense.notes || '-';
+
+  const message = `💸 *تنبيه: تسجيل مصروف جديد*
+🏪 *المنشأة:* ${storeName}
+🏷️ *البند:* ${category}
+💰 *المبلغ:* ${amount} ج.م
+📝 *ملاحظات:* ${notes}
+📅 *التاريخ والوقت:* ${date} - ${time}
+
+✅ تم تسجيل بند المصروف وتحديث الخزينة.`;
+
+  const directUrl = getDirectWhatsAppUrl(config.managerPhone, message, config.countryCode);
+
+  let serverRes;
+  if (config.managerPhone || config.managerEmail) {
+    serverRes = await sendServerNotification({
+      phone: config.managerPhone,
+      email: config.managerEmail,
+      subject: `💸 مصروف جديد: ${category} - ${amount} ج.م`,
+      message: message,
+    });
+  }
+
+  return { directWhatsAppUrl: directUrl, serverResult: serverRes };
+}
+
