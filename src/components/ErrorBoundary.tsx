@@ -1,4 +1,4 @@
-import React, { ErrorInfo, ReactNode } from 'react';
+import React, { Component, ErrorInfo, ReactNode } from 'react';
 import { AlertTriangle, RefreshCw } from 'lucide-react';
 
 interface Props {
@@ -11,11 +11,8 @@ interface State {
   error?: Error;
 }
 
-export default class ErrorBoundary extends React.Component<Props, State> {
-  constructor(props: Props) {
-    super(props);
-    (this as any).state = { hasError: false };
-  }
+export default class ErrorBoundary extends Component<Props, State> {
+  state: State = { hasError: false };
 
   static getDerivedStateFromError(error: Error): State {
     return { hasError: true, error };
@@ -23,23 +20,39 @@ export default class ErrorBoundary extends React.Component<Props, State> {
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error("ErrorBoundary caught an error:", error, errorInfo);
+    
+    // Log telemetry for AI Diagnostics
+    fetch('/api/ai/telemetry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type: 'ERROR',
+        component: (this as any).props.fallbackTitle || 'ErrorBoundary',
+        message: error.message,
+        severity: 'HIGH',
+        metadata: {
+          componentStack: errorInfo.componentStack,
+          time: new Date().toISOString()
+        }
+      })
+    }).catch(err => console.error("Failed to log telemetry:", err));
   }
 
   render() {
-    const state = (this as any).state as State;
-    const props = (this as any).props as Props;
+    const { hasError, error } = (this as any).state;
+    const { fallbackTitle, children } = (this as any).props;
 
-    if (state.hasError) {
+    if (hasError) {
       return (
         <div className="p-8 m-4 bg-card rounded-2xl border border-danger/30 text-center flex flex-col items-center justify-center space-y-4">
           <div className="w-16 h-16 rounded-full bg-danger/10 text-danger flex items-center justify-center text-2xl">
             <AlertTriangle className="w-8 h-8" />
           </div>
           <h2 className="text-xl font-bold text-text-main">
-            {props.fallbackTitle || 'حدث خطأ غير متوقع في هذا القسم'}
+            {fallbackTitle || 'حدث خطأ غير متوقع في هذا القسم'}
           </h2>
           <p className="text-sm text-text-dim max-w-md">
-            {state.error?.message || 'تعذر تحميل البيانات أو حدث استثناء أثناء معالجة الطلب.'}
+            {error?.message || 'تعذر تحميل البيانات أو حدث استثناء أثناء معالجة الطلب.'}
           </p>
           <button
             onClick={() => (this as any).setState({ hasError: false, error: undefined })}
@@ -52,6 +65,6 @@ export default class ErrorBoundary extends React.Component<Props, State> {
       );
     }
 
-    return props.children;
+    return children;
   }
 }

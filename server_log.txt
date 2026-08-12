@@ -1,0 +1,67 @@
+
+> react-example@0.0.0 dev
+> tsx server.ts
+
+[2026-08-12T05:31:57.509Z]  @firebase/firestore: Firestore (12.13.0): enableIndexedDbPersistence() will be deprecated in the future, you can use `FirestoreSettings.cache` instead.
+[Migration Warning] Statement skipped: ALTER TABLE users ADD COLUMN IF NOT EXISTS employe... - Error: must be owner of table users
+[Migration Warning] Statement skipped: ALTER TABLE users ADD COLUMN IF NOT EXISTS employe... - Error: must be owner of table users
+[Migration Warning] Statement skipped: ALTER TABLE users ADD COLUMN IF NOT EXISTS card_st... - Error: must be owner of table users
+[Migration Warning] Statement skipped: ALTER TABLE users ADD COLUMN IF NOT EXISTS status ... - Error: must be owner of table users
+[Migration Warning] Statement skipped: CREATE UNIQUE INDEX IF NOT EXISTS users_employee_c... - Error: must be owner of table users
+[Migration Warning] Statement skipped: ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS br... - Error: must be owner of table audit_logs
+[PostgreSQL Migration Error]: error: duplicate key value violates unique constraint "users_employee_card_id_idx"
+    at /app/applet/node_modules/pg-pool/index.js:45:11
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async runStartupMigrations (/app/applet/src/db/repository.ts:50:5)
+    at async startServer (/app/applet/server.ts:190:5) {
+  length: 239,
+  severity: 'ERROR',
+  code: '23505',
+  detail: 'Key (employee_card_id)=(CARD-ADMIN-999) already exists.',
+  hint: undefined,
+  position: undefined,
+  internalPosition: undefined,
+  internalQuery: undefined,
+  where: undefined,
+  schema: 'public',
+  table: 'users',
+  column: undefined,
+  dataType: undefined,
+  constraint: 'users_employee_card_id_idx',
+  file: 'nbtinsert.c',
+  line: '673',
+  routine: '_bt_check_unique'
+}
+WebSocket server error: Port 24678 is already in use
+[Security Seed] Seeding test users and data...
+[Security Seed Failed] DrizzleQueryError: Failed query: delete from "sale_items" where "sale_items"."company_id" = $1
+params: company_a
+    at NodePgPreparedQuery.queryWithCache (/app/applet/node_modules/src/pg-core/session.ts:73:11)
+    at async <anonymous> (/app/applet/server.ts:1669:21) {
+  query: 'delete from "sale_items" where "sale_items"."company_id" = $1',
+  params: [ 'company_a' ],
+  cause: Error: Cannot use a pool after calling end on the pool
+      at /app/applet/node_modules/pg-pool/index.js:45:11
+      at async <anonymous> (/app/applet/node_modules/src/node-postgres/session.ts:149:14)
+      at async NodePgPreparedQuery.queryWithCache (/app/applet/node_modules/src/pg-core/session.ts:71:12)
+}
+node:events:497
+      throw er; // Unhandled 'error' event
+      ^
+
+Error: listen EADDRINUSE: address already in use 0.0.0.0:3000
+    at Server.setupListenHandle [as _listen2] (node:net:1941:16)
+    at listenInCluster (node:net:1998:12)
+    at node:net:2207:7
+    at process.processTicksAndRejections (node:internal/process/task_queues:89:21)
+Emitted 'error' event on Server instance at:
+    at emitErrorNT (node:net:1977:8)
+    at process.processTicksAndRejections (node:internal/process/task_queues:89:21) {
+  code: 'EADDRINUSE',
+  errno: -98,
+  syscall: 'listen',
+  address: '0.0.0.0',
+  port: 3000
+}
+
+Node.js v22.23.1

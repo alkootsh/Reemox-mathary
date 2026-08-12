@@ -45,6 +45,8 @@ import {
   Settings
 } from 'lucide-react';
 
+import ChartOfAccounts from './ChartOfAccounts';
+
 interface Props {
   expenses: Expense[];
   purchases: Purchase[];
@@ -64,7 +66,7 @@ export default function Accounting({
   suppliers: initialSuppliers,
   products: initialProducts
 }: Props) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'treasuries' | 'opening_balances' | 'expense_accounts' | 'expenses' | 'purchases'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'coa' | 'treasuries' | 'opening_balances' | 'expense_accounts' | 'expenses' | 'purchases'>('overview');
   
   // Opening Balance states
   const [cashOpeningBalance, setCashOpeningBalance] = useState<number>(0);
@@ -381,6 +383,16 @@ export default function Accounting({
             <Wallet size={14} />
             <span>الملخص المالي</span>
           </button>
+
+          <button 
+            onClick={() => setActiveTab('coa')} 
+            className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === 'coa' ? 'bg-gold text-white shadow' : 'text-text-dim hover:text-text-main'
+            }`}
+          >
+            <FolderTree size={14} />
+            <span>شجرة الحسابات (COA)</span>
+          </button>
           
           <button 
             onClick={() => setActiveTab('treasuries')} 
@@ -534,6 +546,11 @@ export default function Accounting({
             </div>
           </div>
         </div>
+      )}
+
+      {/* TAB: CHART OF ACCOUNTS */}
+      {activeTab === 'coa' && (
+        <ChartOfAccounts />
       )}
 
       {/* TAB 2: TREASURIES, SHIFTS, CASH LEDGER & WAREHOUSES */}

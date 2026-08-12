@@ -11,6 +11,10 @@ import Suppliers from './components/Suppliers';
 import Customers from './components/Customers';
 import Expenses from './components/Expenses';
 import Accounting from './components/Accounting';
+import Manufacturing from './components/Manufacturing';
+import AICopilot from './components/AICopilot';
+import HR from './components/HR';
+import CRM from './components/CRM';
 import Purchases from './components/Purchases';
 import Returns from './components/Returns';
 import OrderManagement from './components/OrderManagement';
@@ -45,6 +49,9 @@ type Screen =
   | 'customers' 
   | 'expenses' 
   | 'accounting' 
+  | 'manufacturing'
+  | 'hr'
+  | 'crm'
   | 'purchases' 
   | 'activity-log'
   | 'inventory-movements'
@@ -469,7 +476,7 @@ export default function App() {
       return ['accounting', 'reports', 'expenses', 'purchases', 'customers', 'suppliers', 'dashboard'].includes(screen);
     }
     if (currentUser.role === 'inventory_manager') {
-      return ['inventory', 'inventory-movements', 'categories', 'suppliers'].includes(screen);
+      return ['inventory', 'inventory-movements', 'manufacturing', 'categories', 'suppliers'].includes(screen);
     }
     return true;
   };
@@ -772,8 +779,24 @@ export default function App() {
     );
   }
 
+  const screenContexts: Record<string, { name: string, description: string }> = {
+    'dashboard': { name: 'لوحة التحكم العامة', description: 'ملخص للأداء المالي، المبيعات اليومية، والرسوم البيانية' },
+    'pos': { name: 'نقطة البيع (POS)', description: 'إصدار فواتير سريعة، مسح باركود، وإدارة ورديات الكاشير' },
+    'inventory': { name: 'المخزون والمنتجات', description: 'إضافة منتجات، متابعة الكميات، وتصنيف الأصناف' },
+    'accounting': { name: 'الحسابات العامة', description: 'شجرة الحسابات، قيود اليومية، والتقارير المالية' },
+    'manufacturing': { name: 'التصنيع', description: 'إدارة قوائم المواد BOM وأوامر الإنتاج' },
+    'hr': { name: 'الموارد البشرية', description: 'بيانات الموظفين والرواتب وشؤون الموظفين' },
+    'crm': { name: 'العملاء والولاء', description: 'بيانات العملاء ونقاط الولاء وسجل التفاعلات' },
+    'reports': { name: 'التقارير المتقدمة', description: 'تحليل شامل للمبيعات، المشتريات، والمخزون' }
+  };
+
   return (
     <div className="min-h-screen bg-primary text-text-main font-sans">
+      <AICopilot 
+        currentUser={currentUser} 
+        currentScreen={screenContexts[currentScreen] || { name: currentScreen, description: '' }}
+        companyId="company_default"
+      />
       {/* Top Header Bar */}
       <div className="flex flex-wrap justify-between items-center px-4 py-2 bg-secondary border-b border-border text-xs sticky top-0 z-40 shadow-sm gap-2">
          <div className="flex items-center gap-2 flex-wrap">
@@ -931,6 +954,18 @@ export default function App() {
             />
           )}
 
+          {currentScreen === 'manufacturing' && isScreenAllowed('manufacturing') && (
+            <Manufacturing />
+          )}
+          
+          {currentScreen === 'hr' && isScreenAllowed('hr') && (
+            <HR />
+          )}
+
+          {currentScreen === 'crm' && isScreenAllowed('crm') && (
+            <CRM />
+          )}
+
           {currentScreen === 'purchases' && isScreenAllowed('purchases') && (
             <Purchases purchases={purchases} setPurchases={setPurchases} />
           )}
@@ -975,6 +1010,9 @@ export default function App() {
                   <button onClick={() => setCurrentScreen('inventory')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'inventory' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📦 <span className="text-[10px] mt-1">المخزون</span></button>
                   <button onClick={() => setCurrentScreen('inventory-movements')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'inventory-movements' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📋 <span className="text-[10px] mt-1">حركات المخزون</span></button>
                   <button onClick={() => setCurrentScreen('accounting')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'accounting' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📊 <span className="text-[10px] mt-1">الحسابات</span></button>
+                  <button onClick={() => setCurrentScreen('manufacturing')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'manufacturing' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🏭 <span className="text-[10px] mt-1">التصنيع</span></button>
+                  <button onClick={() => setCurrentScreen('hr')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'hr' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>👥 <span className="text-[10px] mt-1">الموظفين</span></button>
+                  <button onClick={() => setCurrentScreen('crm')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'crm' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>⭐ <span className="text-[10px] mt-1">العملاء/الولاء</span></button>
                   <button onClick={() => setCurrentScreen('reports')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'reports' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📈 <span className="text-[10px] mt-1">التقارير</span></button>
                   <button onClick={() => setCurrentScreen('purchases')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'purchases' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📥 <span className="text-[10px] mt-1">المشتريات</span></button>
                   <button onClick={() => setCurrentScreen('expenses')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'expenses' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📉 <span className="text-[10px] mt-1">المصروفات</span></button>

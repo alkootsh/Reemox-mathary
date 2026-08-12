@@ -62,7 +62,9 @@ import {
   Vault,
   Building2,
   Store,
-  Scale
+  Scale,
+  BrainCircuit,
+  Wand2
 } from 'lucide-react';
 
 export default function Settings({ appConfig, setAppConfig }: { appConfig: AppConfig; setAppConfig: (config: AppConfig) => void; }) {
@@ -188,6 +190,45 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
   const [isTestingWhatsApp, setIsTestingWhatsApp] = useState(false);
   const [isTestingEmail, setIsTestingEmail] = useState(false);
   const [testResult, setTestResult] = useState<{ type: 'whatsapp' | 'email'; success: boolean; message: string } | null>(null);
+
+  // AI Module State
+  const [aiEnabled, setAiEnabled] = useState<boolean>(false);
+  const [aiLicenseKey, setAiLicenseKey] = useState<string>('');
+  const [isSavingAi, setIsSavingAi] = useState(false);
+
+  useEffect(() => {
+    fetchAiConfig();
+  }, []);
+
+  const fetchAiConfig = async () => {
+    try {
+      const res = await fetch('/api/ai/config');
+      const data = await res.json();
+      setAiEnabled(data.isEnabled);
+      setAiLicenseKey(data.licenseKey || '');
+    } catch (err) {
+      console.error("Error fetching AI config:", err);
+    }
+  };
+
+  const handleSaveAiConfig = async () => {
+    setIsSavingAi(true);
+    try {
+      const res = await fetch('/api/ai/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ isEnabled: aiEnabled, licenseKey: aiLicenseKey })
+      });
+      if (res.ok) {
+        setToast({ message: 'تم تحديث إعدادات الذكاء الاصطناعي بنجاح', type: 'success' });
+        window.location.reload(); // Reload to refresh AI copilot instance
+      }
+    } catch (err) {
+      setToast({ message: 'فشل حفظ إعدادات الذكاء الاصطناعي', type: 'warning' });
+    } finally {
+      setIsSavingAi(false);
+    }
+  };
 
   // Fetch Server Notification Status on load
   const checkServerStatus = async () => {
@@ -1983,6 +2024,80 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
                       </label>
                   ))}
               </div>
+            </div>
+
+            {/* AI Co-pilot Configuration Section (Optional/Modular) */}
+            <div className="bg-card p-6 rounded-[32px] border border-gold/30 space-y-6 shadow-xl shadow-gold/5 mt-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 bg-gold/10 rounded-2xl text-gold">
+                    <BrainCircuit size={24} />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-black text-text-main">مديول المساعد الذكي (AI Co-pilot)</h3>
+                    <p className="text-xs text-text-dim">إعدادات تفعيل مديول الذكاء الاصطناعي التفاعلي</p>
+                  </div>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input 
+                    type="checkbox" 
+                    checked={aiEnabled}
+                    onChange={(e) => setAiEnabled(e.target.checked)}
+                    className="sr-only peer" 
+                  />
+                  <div className="w-14 h-7 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-1 after:left-1 after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-gold"></div>
+                </label>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="space-y-3">
+                  <label className="text-xs font-bold text-text-main">مفتاح تفعيل الذكاء الاصطناعي (License Key):</label>
+                  <div className="relative">
+                    <input 
+                      type="password" 
+                      value={aiLicenseKey}
+                      onChange={(e) => setAiLicenseKey(e.target.value)}
+                      placeholder="AI-XXXX-XXXX-XXXX"
+                      className="w-full bg-card2 border border-border rounded-2xl py-3 px-4 text-sm focus:border-gold outline-none transition-all pr-12"
+                    />
+                    <Zap className="absolute right-4 top-3.5 text-gold/50" size={18} />
+                  </div>
+                  <p className="text-[10px] text-text-dim italic">
+                    * هذا المديول يتطلب اشتراكاً منفصلاً ومفتاح تفعيل خاص لربط النظام بـ Google Gemini 2.0 Central.
+                  </p>
+                </div>
+
+                <div className="bg-gold/5 border border-gold/20 p-4 rounded-2xl space-y-3">
+                  <h4 className="text-xs font-bold text-gold flex items-center gap-2">
+                    <Sparkles size={14} />
+                    <span>مميزات المديول النشطة:</span>
+                  </h4>
+                  <ul className="text-[11px] text-text-dim space-y-2">
+                    <li className="flex items-center gap-2">
+                      <CheckCircle2 size={12} className="text-emerald-500" />
+                      <span>تحليل سجلات الأخطاء والـ Telemetry لحظياً.</span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <CheckCircle2 size={12} className="text-emerald-500" />
+                      <span>توفير جولات تعريفية (Onboarding) بناءً على دور المستخدم.</span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <CheckCircle2 size={12} className="text-emerald-500" />
+                      <span>التنبؤ بالأعطال التقنية قبل وقوعها.</span>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleSaveAiConfig}
+                disabled={isSavingAi}
+                className="w-full bg-gold text-black p-4 rounded-2xl font-black text-sm shadow-lg shadow-gold/20 hover:scale-[1.01] active:scale-[0.99] transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+              >
+                {isSavingAi ? <RefreshCw className="animate-spin" size={20} /> : <Wand2 size={20} />}
+                <span>حفظ وتفعيل إعدادات الذكاء الاصطناعي</span>
+              </button>
             </div>
 
             {/* Developer Keygen Suite Component */}

@@ -12,6 +12,7 @@ export const companies = pgTable('companies', {
   address: text('address'),
   currency: text('currency').default('SAR'),
   vatPercentage: numeric('vat_percentage').default('15'),
+  enableEmployeeCards: boolean('enable_employee_cards').default(false),
   createdAt: timestamp('created_at').defaultNow(),
 });
 
@@ -24,6 +25,7 @@ export const branches = pgTable('branches', {
   address: text('address'),
   isMain: boolean('is_main').default(false),
   createdAt: timestamp('created_at').defaultNow(),
+  isActive: boolean('is_active').default(true),
 });
 
 export const users = pgTable('users', {
@@ -105,6 +107,7 @@ export const categories = pgTable('categories', {
   name: text('name').notNull(),
   description: text('description'),
   createdAt: timestamp('created_at').defaultNow(),
+  isActive: boolean('is_active').default(true),
 });
 
 export const brands = pgTable('brands', {
@@ -140,6 +143,7 @@ export const products = pgTable('products', {
   unitId: text('unit_id'),
   isWeighted: boolean('is_weighted').default(false),
   createdAt: timestamp('created_at').defaultNow(),
+  isActive: boolean('is_active').default(true),
 });
 
 export const productBarcodes = pgTable('product_barcodes', {
@@ -158,14 +162,6 @@ export const productVariants = pgTable('product_variants', {
   barcode: text('barcode'),
   price: numeric('price').default('0'),
   stock: numeric('stock').default('0'),
-});
-
-export const productPrices = pgTable('product_prices', {
-  id: text('id').primaryKey(),
-  productId: text('product_id').notNull(),
-  companyId: text('company_id').notNull(),
-  priceType: text('price_type').notNull(), // RETAIL, WHOLESALE
-  price: numeric('price').notNull(),
 });
 
 // ----------------------------------------------------
@@ -301,12 +297,29 @@ export const customers = pgTable('customers', {
   name: text('name').notNull(),
   phone: text('phone'),
   email: text('email'),
-  customerType: text('customer_type').default('retail'), // retail, wholesale, half_wholesale
+  priceLevel: text('price_level').default('RETAIL'),
   balance: numeric('balance').default('0'),
   creditLimit: numeric('credit_limit').default('0'),
   createdAt: timestamp('created_at').defaultNow(),
+  isActive: boolean('is_active').default(true),
 });
 
+export const productPrices = pgTable('product_prices', {
+  id: text('id').primaryKey(),
+  productId: text('product_id').notNull(),
+  companyId: text('company_id').notNull(),
+  priceLevel: text('price_level').notNull(),
+  price: numeric('price').notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const userPermissions = pgTable('user_permissions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull(),
+  companyId: text('company_id').notNull(),
+  permissionKey: text('permission_key').notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+});
 export const customerTransactions = pgTable('customer_transactions', {
   id: text('id').primaryKey(),
   companyId: text('company_id').notNull(),
@@ -337,6 +350,7 @@ export const suppliers = pgTable('suppliers', {
   companyName: text('company_name'),
   balance: numeric('balance').default('0'),
   createdAt: timestamp('created_at').defaultNow(),
+  isActive: boolean('is_active').default(true),
 });
 
 export const supplierTransactions = pgTable('supplier_transactions', {
@@ -471,8 +485,195 @@ export const cashierClosures = pgTable('cashier_closures', {
 });
 
 // ----------------------------------------------------
-// COUNTERS & SEQUENCES
+// FINANCIAL ACCOUNTING (GENERAL LEDGER)
 // ----------------------------------------------------
+
+export const accounts = pgTable('accounts', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id').references(() => companies.id).notNull(),
+  code: text('code').notNull(),
+  name: text('name').notNull(),
+  parentAccountId: text('parent_account_id'),
+  type: text('type').notNull(), // ASSET, LIABILITY, EQUITY, REVENUE, EXPENSE
+  level: integer('level').default(1),
+  isGroup: boolean('is_group').default(false),
+  balance: numeric('balance').default('0'),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const journalEntries = pgTable('journal_entries', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id').references(() => companies.id).notNull(),
+  reference: text('reference').notNull(), // Invoice #, Receipt #, etc.
+  date: timestamp('date').defaultNow(),
+  description: text('description'),
+  status: text('status').default('POSTED'), // DRAFT, POSTED
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const journalItems = pgTable('journal_items', {
+  id: text('id').primaryKey(),
+  journalId: text('journal_id').references(() => journalEntries.id).notNull(),
+  accountId: text('account_id').references(() => accounts.id).notNull(),
+  debit: numeric('debit').default('0'),
+  credit: numeric('credit').default('0'),
+  costCenterId: text('cost_center_id'),
+  partnerId: text('partner_id'), // Customer or Supplier ID
+  notes: text('notes'),
+});
+
+export const costCenters = pgTable('cost_centers', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id').references(() => companies.id).notNull(),
+  name: text('name').notNull(),
+  code: text('code'),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+// ----------------------------------------------------
+// MANUFACTURING (BOM & PRODUCTION)
+// ----------------------------------------------------
+
+export const billsOfMaterials = pgTable('bills_of_materials', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id').references(() => companies.id).notNull(),
+  productId: text('product_id').references(() => products.id).notNull(),
+  name: text('name').notNull(),
+  totalCost: numeric('total_cost').default('0'),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const bomItems = pgTable('bom_items', {
+  id: text('id').primaryKey(),
+  bomId: text('bom_id').references(() => billsOfMaterials.id).notNull(),
+  productId: text('product_id').notNull(),
+  quantity: numeric('quantity').notNull(),
+  unitCost: numeric('unit_cost').default('0'),
+});
+
+// ----------------------------------------------------
+// HUMAN RESOURCES (HR & PAYROLL)
+// ----------------------------------------------------
+
+export const employees = pgTable('employees', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id').references(() => companies.id).notNull(),
+  name: text('name').notNull(),
+  code: text('code').unique(),
+  position: text('position'),
+  department: text('department'),
+  salary: numeric('salary').default('0'),
+  joiningDate: timestamp('joining_date'),
+  status: text('status').default('ACTIVE'), // ACTIVE, TERMINATED, ON_LEAVE
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const payroll = pgTable('payroll', {
+  id: text('id').primaryKey(),
+  employeeId: text('employee_id').references(() => employees.id).notNull(),
+  month: integer('month').notNull(),
+  year: integer('year').notNull(),
+  basicSalary: numeric('basic_salary').notNull(),
+  allowances: numeric('allowances').default('0'),
+  deductions: numeric('deductions').default('0'),
+  netSalary: numeric('net_salary').notNull(),
+  status: text('status').default('DRAFT'), // DRAFT, APPROVED, PAID
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+// ----------------------------------------------------
+// CRM & LOYALTY
+// ----------------------------------------------------
+
+export const loyaltyPoints = pgTable('loyalty_points', {
+  id: text('id').primaryKey(),
+  customerId: text('customer_id').references(() => customers.id).notNull(),
+  points: integer('points').default(0),
+  lastUpdated: timestamp('last_updated').defaultNow(),
+});
+
+export const customerInteractions = pgTable('customer_interactions', {
+  id: text('id').primaryKey(),
+  customerId: text('customer_id').references(() => customers.id).notNull(),
+  type: text('type').notNull(), // CALL, MEETING, NOTE, COMPLAINT
+  notes: text('notes'),
+  date: timestamp('date').defaultNow(),
+  userId: text('user_id').references(() => users.id),
+});
+
+// ----------------------------------------------------
+// PRODUCT EXTENSIONS (BATCHES & SERIALS)
+// ----------------------------------------------------
+
+export const productBatches = pgTable('product_batches', {
+  id: text('id').primaryKey(),
+  productId: text('product_id').references(() => products.id).notNull(),
+  batchNumber: text('batch_number').notNull(),
+  expiryDate: timestamp('expiry_date'),
+  quantity: numeric('quantity').default('0'),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+// ----------------------------------------------------
+// AI CO-PILOT MODULE
+// ----------------------------------------------------
+
+export const aiConfigs = pgTable('ai_configs', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id').references(() => companies.id).notNull(),
+  isEnabled: boolean('is_enabled').default(false),
+  licenseKey: text('license_key'),
+  updatedAt: timestamp('updated_at').defaultNow(),
+});
+
+export const userAiMemories = pgTable('user_ai_memories', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').references(() => users.id).notNull(),
+  onboardingCompleted: boolean('onboarding_completed').default(false),
+  interactionStyle: text('interaction_style').default('PROFESSIONAL'), // FRIENDLY, CONCISE, PROFESSIONAL
+  preferences: jsonb('preferences').default({}),
+  lastInteractionAt: timestamp('last_interaction_at').defaultNow(),
+});
+
+export const systemTelemetry = pgTable('system_telemetry', {
+  id: text('id').primaryKey(),
+  type: text('type').notNull(), // ERROR, PERFORMANCE, SECURITY
+  component: text('component'),
+  severity: text('severity'), // LOW, MEDIUM, HIGH, CRITICAL
+  message: text('message').notNull(),
+  metadata: jsonb('metadata'),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const companyModuleOverrides = pgTable('company_module_overrides', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id').references(() => companies.id).notNull(),
+  moduleName: text('module_name').notNull(),
+  isEnabled: boolean('is_enabled').default(false).notNull(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+  updatedBy: text('updated_by')
+});
+
+export const branchModuleOverrides = pgTable('branch_module_overrides', {
+  id: text('id').primaryKey(),
+  branchId: text('branch_id').references(() => branches.id).notNull(),
+  moduleName: text('module_name').notNull(),
+  isEnabled: boolean('is_enabled').default(false).notNull(),
+  updatedAt: timestamp('updated_at').defaultNow(),
+  updatedBy: text('updated_by')
+});
+
+export const customFieldDefinitions = pgTable('custom_field_definitions', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id').references(() => companies.id).notNull(),
+  entityType: text('entity_type').notNull(), // PRODUCT, CUSTOMER, etc.
+  fieldKey: text('field_key').notNull(),
+  label: text('label').notNull(),
+  dataType: text('data_type').notNull(), // TEXT, NUMBER, BOOLEAN, SELECT
+  isRequired: boolean('is_required').default(false),
+  optionsJson: jsonb('options_json').default([]), // For SELECT fields
+  createdAt: timestamp('created_at').defaultNow()
+});
 
 export const counters = pgTable('counters', {
   id: text('id').primaryKey(), // e.g. sale_company_default

@@ -29,10 +29,21 @@ import {
     getUnits, saveUnit, deleteUnit,
     getSaleReturns, createSaleReturnTransaction, deleteSaleReturnTransaction,
     getPurchaseReturns, createPurchaseReturnTransaction, deletePurchaseReturnTransaction,
-    logAuditEvent, getAuditLogs, runStartupMigrations
+    logAuditEvent, getAuditLogs, runStartupMigrations, softDeleteEntity,
+    getChartOfAccounts, createJournalEntry, getItemLedger, getFinancialSummary,
+    getBOMs, createBOM,
+    getEmployees, createEmployee, getPayroll, getCustomerInteractions, addCustomerInteraction, getLoyaltyPoints,
+    getAiConfig, updateAiConfig, getUserAiMemory, updateUserAiMemory, logSystemTelemetry, getSystemTelemetry,
+    getCompanyModuleOverrides, setCompanyModuleOverride,
+    getBranchModuleOverrides, setBranchModuleOverride,
+    getCustomFieldDefinitions, createCustomFieldDefinition
 } from "./src/db/repository.ts";
 import { runMigration } from "./scripts/migrateFirestoreToPostgres.ts";
 import { db } from "./src/db/index.ts";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import dotenv from "dotenv";
+
+dotenv.config();
 import { users, memberships, products, sales, customers, suppliers, purchases, expenses, categories, saleItems, payments, saleReturns, saleReturnItems, inventoryMovements, customerTransactions, supplierTransactions, purchaseReturns, purchaseItems, cashierSessions } from "./src/db/schema.ts";
 import { eq, and, inArray } from "drizzle-orm";
 import { adminAuth } from "./src/lib/firebase-admin.ts";
@@ -731,6 +742,97 @@ async function startServer() {
         }
     });
 
+    // ====================================================
+    // DYNAMIC ENGINE: RUNTIME CONFIGURATION & MIDDLEWARE
+    // ====================================================
+
+    const runtimeConfigCache = new Map<string, any>();
+
+    async function getRuntimeConfig(companyId: string, branchId: string) {
+        const cacheKey = `${companyId}_${branchId}`;
+        if (runtimeConfigCache.has(cacheKey)) {
+            return runtimeConfigCache.get(cacheKey);
+        }
+
+        const cOverrides = await getCompanyModuleOverrides(companyId);
+        const bOverrides = await getBranchModuleOverrides(branchId);
+
+        const enabledModules = new Set<string>();
+        // System defaults
+        enabledModules.add('POS');
+        enabledModules.add('SALES');
+        enabledModules.add('INVENTORY');
+
+        for (const mo of cOverrides) {
+            if (mo.isEnabled) enabledModules.add(mo.moduleName);
+            else enabledModules.delete(mo.moduleName);
+        }
+
+        for (const mo of bOverrides) {
+            if (mo.isEnabled) enabledModules.add(mo.moduleName);
+            else enabledModules.delete(mo.moduleName);
+        }
+
+        const customFields = await getCustomFieldDefinitions(companyId);
+
+        const config = {
+            enabledModules: Array.from(enabledModules),
+            customFields,
+            timestamp: Date.now()
+        };
+
+        runtimeConfigCache.set(cacheKey, config);
+        return config;
+    }
+
+    function requireModule(moduleName: string) {
+        return async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+            const ctx = (req as any).userContext;
+            if (!ctx) return res.status(401).json({ error: 'Unauthorized: Missing context' });
+
+            const config = await getRuntimeConfig(ctx.companyId, ctx.branchId);
+            if (!config.enabledModules.includes(moduleName)) {
+                return res.status(403).json({ error: `Forbidden: Module ${moduleName} is disabled for this tenant.` });
+            }
+            next();
+        };
+    }
+
+    app.get("/api/config/runtime", async (req, res) => {
+        try {
+            const ctx = (req as any).userContext;
+            if (!ctx) return res.status(401).json({ error: 'Unauthorized' });
+            const config = await getRuntimeConfig(ctx.companyId, ctx.branchId);
+            res.json({ success: true, data: config });
+        } catch (err: any) {
+            res.status(500).json({ success: false, error: err?.message });
+        }
+    });
+
+    app.post("/api/config/modules/company", async (req, res) => {
+        try {
+            const ctx = (req as any).userContext;
+            if (!ctx) return res.status(401).json({ error: 'Unauthorized' });
+            if (ctx.role !== 'ADMIN' && ctx.role !== 'MANAGER' && ctx.role !== 'owner') {
+                return res.status(403).json({ error: 'Forbidden: Only Admins/Managers can change configuration' });
+            }
+
+            const { moduleName, isEnabled } = req.body;
+            await setCompanyModuleOverride(ctx.companyId, moduleName, isEnabled, ctx.uid);
+
+            // Invalidate cache
+            for (const key of runtimeConfigCache.keys()) {
+                if (key.startsWith(`${ctx.companyId}_`)) {
+                    runtimeConfigCache.delete(key);
+                }
+            }
+
+            res.json({ success: true });
+        } catch (err: any) {
+            res.status(400).json({ success: false, error: err?.message });
+        }
+    });
+
     // 2. Companies & Branches
     app.get("/api/companies", async (req, res) => {
         const list = await getCompanies();
@@ -978,11 +1080,17 @@ async function startServer() {
 
     app.post("/api/sales", async (req, res) => {
         try {
-            const saleId = await createSaleTransaction(req.body);
+            const ctx = (req as any).userContext;
+            const saleData = { ...req.body, userRole: ctx?.role };
+            const saleId = await createSaleTransaction(saleData);
             res.json({ success: true, id: saleId });
         } catch (err: any) {
             console.error('Sale Transaction Error:', err);
-            res.status(500).json({ success: false, error: err?.message || 'Sale transaction failed' });
+            if (err.message === 'CREDIT_LIMIT_EXCEEDED') {
+                res.status(403).json({ success: false, error: 'CREDIT_LIMIT_EXCEEDED' });
+            } else {
+                res.status(500).json({ success: false, error: err?.message || 'Sale transaction failed' });
+            }
         }
     });
 
@@ -994,6 +1102,235 @@ async function startServer() {
         } catch (err: any) {
             console.error('Delete Sale Error:', err);
             res.status(500).json({ success: false, error: err?.message || 'Failed to delete sale' });
+        }
+    });
+
+    // --- ACCOUNTING & REPORTS ---
+    app.get("/api/accounts", async (req, res) => {
+        try {
+            const companyId = (req.query.companyId as string) || "company_default";
+            const accs = await getChartOfAccounts(companyId);
+            res.json(accs);
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.post("/api/journal-entries", async (req, res) => {
+        try {
+            const entryId = await createJournalEntry(req.body.companyId, req.body);
+            res.json({ success: true, id: entryId });
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.get("/api/reports/item-ledger/:productId", async (req, res) => {
+        try {
+            const companyId = (req.query.companyId as string) || "company_default";
+            const ledger = await getItemLedger(companyId, req.params.productId);
+            res.json(ledger);
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.get("/api/reports/financial-summary", async (req, res) => {
+        try {
+            const companyId = (req.query.companyId as string) || "company_default";
+            const summary = await getFinancialSummary(companyId);
+            res.json(summary);
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    // --- MANUFACTURING ---
+    app.get("/api/manufacturing/boms", async (req, res) => {
+        try {
+            const companyId = (req.query.companyId as string) || "company_default";
+            const boms = await getBOMs(companyId);
+            res.json(boms);
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.post("/api/manufacturing/boms", async (req, res) => {
+        try {
+            const companyId = (req.body.companyId as string) || "company_default";
+            const bomId = await createBOM(companyId, req.body);
+            res.json({ success: true, id: bomId });
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    // --- HR & PAYROLL ---
+    app.get("/api/employees", async (req, res) => {
+        try {
+            const companyId = (req.query.companyId as string) || "company_default";
+            const emps = await getEmployees(companyId);
+            res.json(emps);
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.post("/api/employees", async (req, res) => {
+        try {
+            const companyId = (req.body.companyId as string) || "company_default";
+            const empId = await createEmployee(companyId, req.body);
+            res.json({ success: true, id: empId });
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.get("/api/payroll", async (req, res) => {
+        try {
+            const companyId = (req.query.companyId as string) || "company_default";
+            const pays = await getPayroll(companyId);
+            res.json(pays);
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    // --- CRM ---
+    app.get("/api/crm/interactions/:customerId", async (req, res) => {
+        try {
+            const interactions = await getCustomerInteractions(req.params.customerId);
+            res.json(interactions);
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.post("/api/crm/interactions", async (req, res) => {
+        try {
+            const id = await addCustomerInteraction(req.body);
+            res.json({ success: true, id });
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.get("/api/crm/loyalty/:customerId", async (req, res) => {
+        try {
+            const loyalty = await getLoyaltyPoints(req.params.customerId);
+            res.json(loyalty);
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    // --- AI CO-PILOT MODULE ---
+    const genAI = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
+
+    app.get("/api/ai/config", async (req, res) => {
+        try {
+            const companyId = (req.query.companyId as string) || "company_default";
+            const config = await getAiConfig(companyId);
+            res.json(config || { isEnabled: false });
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.post("/api/ai/config", async (req, res) => {
+        try {
+            const { isEnabled, licenseKey, companyId } = req.body;
+            await updateAiConfig(companyId || "company_default", isEnabled, licenseKey);
+            res.json({ success: true });
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.get("/api/ai/memory/:userId", async (req, res) => {
+        try {
+            const memory = await getUserAiMemory(req.params.userId);
+            res.json(memory || { onboardingCompleted: false });
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.post("/api/ai/memory", async (req, res) => {
+        try {
+            const { userId, data } = req.body;
+            await updateUserAiMemory(userId, data);
+            res.json({ success: true });
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.post("/api/ai/chat", async (req, res) => {
+        try {
+            if (!genAI) {
+                return res.status(500).json({ error: "Gemini API key not configured" });
+            }
+
+            const { message, userContext, screenContext, history } = req.body;
+            const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
+            // 1. Fetch System Telemetry for diagnostics
+            const telemetry = await getSystemTelemetry(10);
+            const telemetryContext = telemetry.map(t => `[${t.createdAt}] ${t.type} in ${t.component}: ${t.message} (${t.severity})`).join("\n");
+
+            // 2. Build System Prompt with Context
+            const systemPrompt = `
+                You are "Maro AI", the advanced Co-pilot for the MARO ERP Business system.
+                Your mission is to assist, guide, and diagnose the system for the user.
+
+                USER CONTEXT:
+                - Name: ${userContext.name}
+                - Role: ${userContext.role}
+                - Business: ${userContext.companyName || 'MARO Business'}
+
+                SCREEN CONTEXT:
+                - Current View: ${screenContext.name}
+                - Description: ${screenContext.description}
+
+                SYSTEM TELEMETRY (Recent Logs):
+                ${telemetryContext}
+
+                INSTRUCTIONS:
+                1. Be human-like, professional, and helpful. Use the user's name often.
+                2. If this is the first interaction (Onboarding), offer a quick interactive tour based on their role.
+                3. You can explain any part of the system.
+                4. For diagnostics: If you see CRITICAL or HIGH severity logs in telemetry, warn the user politely and offer solutions.
+                5. Predict issues: If there are many "PERFORMANCE" logs, suggest checking database size or hardware.
+                6. Respond in the same language as the user (Arabic preferred for this system).
+            `;
+
+            const chat = model.startChat({
+                history: history || [],
+                generationConfig: { maxOutputTokens: 1000 },
+            });
+
+            // Prepend system context to the first message if needed or use systemInstruction in newer SDKs
+            // For simplicity with this SDK version, we'll include it in the prompt if history is empty
+            const fullPrompt = history && history.length > 0 ? message : `${systemPrompt}\n\nUser Message: ${message}`;
+            
+            const result = await chat.sendMessage(fullPrompt);
+            const response = await result.response;
+            res.json({ text: response.text() });
+        } catch (err: any) {
+            console.error("AI Chat Error:", err);
+            res.status(500).json({ error: err.message });
+        }
+    });
+
+    app.post("/api/ai/telemetry", async (req, res) => {
+        try {
+            const { type, component, message, severity, metadata } = req.body;
+            await logSystemTelemetry(type, component, message, severity, metadata);
+            res.json({ success: true });
+        } catch (err: any) {
+            res.status(500).json({ error: err.message });
         }
     });
 
@@ -1253,13 +1590,20 @@ async function startServer() {
     });
 
     app.delete("/api/customers/:id", async (req, res) => {
+        res.status(403).json({ success: false, error: 'RECORD_HAS_FINANCIAL_HISTORY' });
+    });
+
+    app.patch("/api/customers/:id/deactivate", async (req, res) => {
         try {
-            const companyId = (req as any).userContext?.companyId || (req.query.companyId as string) || 'company_default';
-            await deleteCustomer(req.params.id, companyId);
+            const companyId = (req as any).userContext?.companyId || 'company_default';
+            const role = (req as any).userContext?.role || 'cashier';
+            if (role === 'cashier') return res.status(403).json({ success: false, error: 'Unauthorized' });
+            
+            await softDeleteEntity(companyId, 'customers', req.params.id);
             res.json({ success: true });
         } catch (err: any) {
-            console.error('Delete Customer Error:', err);
-            res.status(500).json({ success: false, error: err?.message || 'Failed to delete customer' });
+            console.error('Deactivate Customer Error:', err);
+            res.status(err.message === 'RECORD_HAS_FINANCIAL_HISTORY' ? 403 : 500).json({ success: false, error: err.message });
         }
     });
 

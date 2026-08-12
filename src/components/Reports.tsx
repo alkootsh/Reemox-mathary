@@ -62,6 +62,7 @@ import CategoryBreakdown from './reports/CategoryBreakdown';
 import CashFlowCard, { CashFlowData } from './reports/CashFlowCard';
 import IncomeStatementModal from './reports/IncomeStatementModal';
 import SalesCharts from './reports/SalesCharts';
+import ItemLedger from './ItemLedger';
 
 interface Props {
   purchases?: Purchase[];
@@ -91,6 +92,7 @@ export type ReportTab =
   | 'suppliers' 
   | 'expenses' 
   | 'inventory' 
+  | 'item_ledger'
   | 'tax'
   | 'advanced';
 
@@ -1445,6 +1447,7 @@ export default function Reports({
             { id: 'suppliers', label: 'مستحقات الموردين', icon: '🚚' },
             { id: 'expenses', label: 'تحليل المصروفات', icon: '📉' },
             { id: 'inventory', label: 'المخزون والنواقص', icon: '⚠️' },
+            { id: 'item_ledger', label: 'كارت حركة الصنف', icon: '📋' },
             { id: 'tax', label: 'الإقرار الضريبي (VAT)', icon: '🧾' },
             { id: 'advanced', label: 'التحليل المتقدم والفروع', icon: '🔮', highlight: true }
           ] as const
@@ -2783,6 +2786,10 @@ export default function Reports({
             </div>
           </div>
         </div>
+      )}
+
+      {activeTab === 'item_ledger' && (
+        <ItemLedger />
       )}
 
       {/* TAB 8: VAT & TAX REPORT */}

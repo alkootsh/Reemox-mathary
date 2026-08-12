@@ -1,6 +1,6 @@
 {
-  "name": "MARO Lite",
-  "description": "نظام محاسبي وسحابي متكامل لإدارة المبيعات والمخزون والمصروفات وصلاحيات الموظفين والكاشير - MARO ERP Lite",
+  "name": "MARO ERP Business",
+  "description": "نظام ERP متكامل لإدارة المحاسبة المالية، المستودعات، المبيعات (POS)، التصنيع، والموارد البشرية - مستوحى من المعايير العالمية Odoo & ERPNext",
   "requestFramePermissions": [
     "camera"
   ],

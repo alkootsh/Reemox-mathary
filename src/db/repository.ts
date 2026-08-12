@@ -4,7 +4,11 @@ import {
   sales, saleItems, payments, inventoryMovements, cashierSessions, 
   customers, suppliers, purchases, purchaseItems, expenses, counters,
   customerTransactions, supplierTransactions, cashierTransactions, expenseCategories,
-  saleReturns, saleReturnItems, purchaseReturns, purchaseReturnItems, auditLogs
+  saleReturns, saleReturnItems, purchaseReturns, purchaseReturnItems, auditLogs,
+  userPermissions, productPrices, accounts, journalEntries, journalItems, costCenters,
+  billsOfMaterials, bomItems, employees, payroll, loyaltyPoints, customerInteractions, productBatches,
+  aiConfigs, userAiMemories, systemTelemetry,
+  companyModuleOverrides, branchModuleOverrides, customFieldDefinitions
 } from './schema.ts';
 import { eq, and, sql, desc, ne } from 'drizzle-orm';
 
@@ -20,45 +24,72 @@ function requireTenant(companyId?: string): string {
 // STARTUP MIGRATIONS
 // ----------------------------------------------------
 export async function runStartupMigrations() {
+  const pool = createPool();
   try {
-    const pool = createPool();
-    await pool.query(`
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_code text;
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_card_id text;
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS card_status text DEFAULT 'ACTIVE';
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS status text DEFAULT 'ACTIVE';
-      CREATE UNIQUE INDEX IF NOT EXISTS users_employee_card_id_idx ON users(employee_card_id) WHERE employee_card_id IS NOT NULL;
-      
-      ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS branch_id text;
+    // Attempt column additions individually to avoid complete failure if one fails (e.g. permission issues)
+    const migrationStatements = [
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_code text`,
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_card_id text`,
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS card_status text DEFAULT 'ACTIVE'`,
+      `ALTER TABLE users ADD COLUMN IF NOT EXISTS status text DEFAULT 'ACTIVE'`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS users_employee_card_id_idx ON users(employee_card_id) WHERE employee_card_id IS NOT NULL`,
+      `ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS branch_id text`
+    ];
 
+    for (const stmt of migrationStatements) {
+      try {
+        await pool.query(stmt);
+      } catch (err: any) {
+        // Log notice instead of throwing if it's a permission issue or already exists
+        if (err.code === '42501' || err.code === '42701') {
+          console.warn(`[Migration Warning] Statement skipped: ${stmt.substring(0, 50)}... - Error: ${err.message}`);
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    // Seed logic usually works fine if we have INSERT permissions
+    await pool.query(`
       -- Seed default company & branch if not exists
       INSERT INTO companies (id, name, tax_number, phone, address, currency, vat_percentage)
-      VALUES ('company_default', 'شركة مارو للتجارة والمحاسبة', '300000000000003', '01000000000', 'الفرع الرئيسي', 'SAR', '15')
+      VALUES ('company_default', 'شركة مارو للأعمال - MARO ERP Business', '300000000000003', '01000000000', 'المقر الرئيسي', 'SAR', '15')
       ON CONFLICT (id) DO NOTHING;
 
       INSERT INTO branches (id, company_id, name, code, is_main)
       VALUES ('branch_main', 'company_default', 'الفرع الرئيسي', 'MAIN', true)
       ON CONFLICT (id) DO NOTHING;
 
+      -- Seed Chart of Accounts (COA) - Basic Level 1
+      INSERT INTO accounts (id, company_id, code, name, type, level, is_group)
+      VALUES
+        ('acc_1', 'company_default', '1', 'الأصول', 'ASSET', 1, true),
+        ('acc_2', 'company_default', '2', 'الخصوم', 'LIABILITY', 1, true),
+        ('acc_3', 'company_default', '3', 'حقوق الملكية', 'EQUITY', 1, true),
+        ('acc_4', 'company_default', '4', 'الإيرادات', 'REVENUE', 1, true),
+        ('acc_5', 'company_default', '5', 'المصروفات', 'EXPENSE', 1, true)
+      ON CONFLICT (id) DO NOTHING;
+
+      -- Seed COA - Level 2 (Cash & Bank)
+      INSERT INTO accounts (id, company_id, code, name, parent_account_id, type, level, is_group)
+      VALUES
+        ('acc_11', 'company_default', '11', 'الأصول المتداولة', 'acc_1', 'ASSET', 2, true),
+        ('acc_111', 'company_default', '111', 'النقدية وما في حكمها', 'acc_11', 'ASSET', 3, true),
+        ('acc_cash_main', 'company_default', '111001', 'الخزينة الرئيسية', 'acc_111', 'ASSET', 4, false),
+        ('acc_bank_main', 'company_default', '111002', 'البنك الأهلي', 'acc_111', 'ASSET', 4, false)
+      ON CONFLICT (id) DO NOTHING;
+
       -- Seed default demo users with card IDs if not exist
       INSERT INTO users (id, uid, email, name, pin, role, cashier_type, company_id, branch_id, employee_code, employee_card_id, card_status, status)
       VALUES 
         ('usr-admin', 'usr-admin', 'admin@maro-pos.local', 'المدير العام', '1234', 'admin', 'retail', 'company_default', 'branch_main', 'EMP-001', 'CARD-ADMIN-999', 'ACTIVE', 'ACTIVE'),
-        ('usr-cashier', 'usr-cashier', 'cashier@maro-pos.local', 'كاشير الفرع', '0000', 'cashier', 'retail', 'company_default', 'branch_main', 'EMP-002', 'CARD-CASHIER-101', 'ACTIVE', 'ACTIVE'),
-        ('usr-acc', 'usr-acc', 'accountant@maro-pos.local', 'المحاسب المالي', '1111', 'accountant', 'retail', 'company_default', 'branch_main', 'EMP-003', 'CARD-ACC-202', 'ACTIVE', 'ACTIVE'),
-        ('usr-inv', 'usr-inv', 'inventory@maro-pos.local', 'أمين المخزن', '2222', 'inventory_manager', 'retail', 'company_default', 'branch_main', 'EMP-004', 'CARD-INV-303', 'ACTIVE', 'ACTIVE')
-      ON CONFLICT (id) DO UPDATE SET
-        employee_code = COALESCE(users.employee_code, EXCLUDED.employee_code),
-        employee_card_id = COALESCE(users.employee_card_id, EXCLUDED.employee_card_id),
-        card_status = COALESCE(users.card_status, EXCLUDED.card_status),
-        status = COALESCE(users.status, EXCLUDED.status);
+        ('usr-cashier', 'usr-cashier', 'cashier@maro-pos.local', 'كاشير الفرع', '0000', 'cashier', 'retail', 'company_default', 'branch_main', 'EMP-002', 'CARD-CASHIER-101', 'ACTIVE', 'ACTIVE')
+      ON CONFLICT (id) DO NOTHING;
 
       INSERT INTO memberships (id, user_id, uid, company_id, branch_id, role, status)
       VALUES
         ('mem-admin', 'usr-admin', 'usr-admin', 'company_default', 'branch_main', 'ADMIN', 'ACTIVE'),
-        ('mem-cashier', 'usr-cashier', 'usr-cashier', 'company_default', 'branch_main', 'CASHIER', 'ACTIVE'),
-        ('mem-acc', 'usr-acc', 'usr-acc', 'company_default', 'branch_main', 'ACCOUNTANT', 'ACTIVE'),
-        ('mem-inv', 'usr-inv', 'usr-inv', 'company_default', 'branch_main', 'INVENTORY_MANAGER', 'ACTIVE')
+        ('mem-cashier', 'usr-cashier', 'usr-cashier', 'company_default', 'branch_main', 'CASHIER', 'ACTIVE')
       ON CONFLICT (id) DO NOTHING;
     `);
     console.log('[PostgreSQL Migration] Startup migrations and user cards seed applied successfully');
@@ -268,8 +299,15 @@ export async function updateUserCard(userId: string, cardData: {
     throw new Error('User not found');
   }
 
+  // Check company setting
+  const company = await db.select().from(companies).where(eq(companies.id, cId)).limit(1);
+  const enableEmployeeCards = company.length > 0 ? company[0].enableEmployeeCards : false;
+
   // 2. If assigning a new non-empty cardId, check uniqueness across other users
   if (cardData.employeeCardId && cardData.employeeCardId.trim() !== '') {
+    if (!enableEmployeeCards) {
+      throw new Error('ميزة كارت الموظف غير مفعلة لهذه الشركة');
+    }
     const cleanCard = cardData.employeeCardId.trim();
     const duplicate = await db.select().from(users).where(and(eq(users.employeeCardId, cleanCard), sql`${users.id} != ${userId}`)).limit(1);
     if (duplicate.length > 0) {
@@ -443,6 +481,7 @@ export async function createSaleTransaction(saleData: {
   customerId?: string;
   isCredit?: boolean;
   offlineSaleId?: string;
+  userRole?: string;
   items: Array<{
     productId: string;
     productName: string;
@@ -453,6 +492,12 @@ export async function createSaleTransaction(saleData: {
 }) {
   const cId = requireTenant(saleData.companyId);
   const saleId = saleData.id || `sale_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+
+  // Auto-generate invoice number if missing
+  if (!saleData.invoiceNumber) {
+    const nextVal = await getNextSequence(cId, 'sale');
+    saleData.invoiceNumber = `INV-${nextVal.toString().padStart(5, '0')}`;
+  }
 
   // Idempotency check for offline sales
   if (saleData.offlineSaleId) {
@@ -470,6 +515,62 @@ export async function createSaleTransaction(saleData: {
       throw new Error(`Payment amounts do not equal sale total (${splitTotal} != ${saleData.total})`);
     }
   }
+
+  // Credit Limit Validation
+  if (saleData.customerId && saleData.isCredit) {
+    const customer = await db.select().from(customers).where(and(eq(customers.id, saleData.customerId), eq(customers.companyId, cId))).limit(1);
+    if (customer.length > 0) {
+      const cust = customer[0];
+      if (!cust.isActive) throw new Error('CUSTOMER_INACTIVE');
+      const currentDebt = await getCustomerDebt(cId, saleData.customerId);
+      const newDebt = currentDebt + saleData.total;
+      if (Number(cust.creditLimit) > 0 && newDebt > Number(cust.creditLimit)) {
+        throw new Error('CREDIT_LIMIT_EXCEEDED');
+      }
+    }
+  }
+
+  // Product Active Validation & Price Resolution
+  let calculatedSubtotal = 0;
+  for (const item of saleData.items) {
+    const prodRes = await db.select().from(products).where(and(eq(products.id, item.productId), eq(products.companyId, cId))).limit(1);
+    if (prodRes.length === 0) throw new Error('PRODUCT_NOT_FOUND');
+    const prod = prodRes[0];
+    if (!prod.isActive) throw new Error('PRODUCT_INACTIVE');
+
+    // Price Resolution Logic
+    const serverPriceStr = await getPriceForCustomer(item.productId, saleData.customerId || '', cId);
+    const serverPrice = Number(serverPriceStr);
+    
+    // Override logic: if requested price differs from server price, check if user has permission
+    const requestedPrice = Number(item.price);
+    const isOverride = requestedPrice > 0 && Math.abs(requestedPrice - serverPrice) > 0.01;
+    
+    if (isOverride) {
+      const canOverride = saleData.userRole === 'ADMIN' || saleData.userRole === 'MANAGER';
+      if (!canOverride) {
+        // Enforce server price for Cashier or unauthorized roles
+        item.price = serverPrice;
+      }
+      // If MANAGER/ADMIN, we keep the requestedPrice as item.price
+    } else {
+      // Use serverPrice if no override or requestedPrice is <= 0
+      item.price = serverPrice;
+    }
+    
+    item.total = item.price * item.quantity;
+    calculatedSubtotal += item.total;
+  }
+
+  // Recalculate totals to be sure
+  const vatRate = 0.15; // Should ideally come from company settings
+  const vatAmount = calculatedSubtotal * vatRate;
+  const total = calculatedSubtotal + vatAmount;
+
+  // Update saleData with safe values
+  saleData.subtotal = calculatedSubtotal;
+  saleData.vatAmount = vatAmount;
+  saleData.total = total;
 
   // SQL Transaction
   return await db.transaction(async (tx) => {
@@ -940,6 +1041,26 @@ export async function getCustomers(companyId: string) {
     console.error('getCustomers error:', err);
     return [];
   }
+}
+
+export async function getCustomerDebt(companyId: string, customerId: string): Promise<number> {
+  const cId = requireTenant(companyId);
+  const transactions = await db
+    .select({
+      type: customerTransactions.type,
+      amount: customerTransactions.amount,
+    })
+    .from(customerTransactions)
+    .where(and(eq(customerTransactions.companyId, cId), eq(customerTransactions.customerId, customerId)));
+
+  let debt = 0;
+  for (const t of transactions) {
+    const amount = parseFloat(t.amount);
+    if (t.type === 'CREDIT_SALE') debt += amount;
+    else if (t.type === 'PAYMENT') debt -= amount;
+    else if (t.type === 'RETURN') debt -= amount;
+  }
+  return debt;
 }
 
 export async function saveCustomer(data: { id?: string; companyId: string; name: string; phone?: string; email?: string; balance?: number; creditLimit?: number }) {
@@ -1573,6 +1694,416 @@ export async function createPurchaseReturnTransaction(returnData: {
   });
 }
 
+export async function getChartOfAccounts(companyId: string) {
+  const cId = requireTenant(companyId);
+  try {
+    const allAccounts = await db.select().from(accounts).where(eq(accounts.companyId, cId)).orderBy(accounts.code);
+    return allAccounts.map(acc => ({
+      ...acc,
+      balance: Number(acc.balance || 0)
+    }));
+  } catch (err) {
+    console.error('getChartOfAccounts error:', err);
+    return [];
+  }
+}
+
+export async function createJournalEntry(companyId: string, entryData: {
+  reference: string;
+  description?: string;
+  date?: string;
+  items: { accountId: string; debit: number; credit: number; costCenterId?: string; partnerId?: string; notes?: string }[];
+}) {
+  const cId = requireTenant(companyId);
+  const journalId = `jou_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+
+  return await db.transaction(async (tx) => {
+    // 1. Insert Header
+    await tx.insert(journalEntries).values({
+      id: journalId,
+      companyId: cId,
+      reference: entryData.reference,
+      description: entryData.description || '',
+      date: entryData.date ? new Date(entryData.date) : new Date(),
+    });
+
+    // 2. Insert Items and Update Balances
+    for (const item of entryData.items) {
+      const itemId = `jitm_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+      await tx.insert(journalItems).values({
+        id: itemId,
+        journalId,
+        accountId: item.accountId,
+        debit: String(item.debit),
+        credit: String(item.credit),
+        costCenterId: item.costCenterId,
+        partnerId: item.partnerId,
+        notes: item.notes
+      });
+
+      // Update Account Balance
+      const acc = await tx.select().from(accounts).where(and(eq(accounts.id, item.accountId), eq(accounts.companyId, cId))).for('update');
+      if (acc.length > 0) {
+        const currentBalance = Number(acc[0].balance || 0);
+        // Balance increases with Debit for Assets/Expenses, and with Credit for Liabilities/Equity/Revenue
+        const isDebitNormal = ['ASSET', 'EXPENSE'].includes(acc[0].type);
+        const effect = isDebitNormal ? (item.debit - item.credit) : (item.credit - item.debit);
+        const newBalance = currentBalance + effect;
+        await tx.update(accounts).set({ balance: String(newBalance) }).where(and(eq(accounts.id, item.accountId), eq(accounts.companyId, cId)));
+      }
+    }
+
+    return journalId;
+  });
+}
+
+export async function getItemLedger(companyId: string, productId: string) {
+  const cId = requireTenant(companyId);
+  try {
+    // Fetch all movements for this product
+    const movements = await db.select()
+      .from(inventoryMovements)
+      .where(and(eq(inventoryMovements.productId, productId), eq(inventoryMovements.companyId, cId)))
+      .orderBy(inventoryMovements.createdAt);
+
+    let runningBalance = 0;
+    return movements.map(m => {
+      const qty = Number(m.quantity);
+      runningBalance += qty;
+      return {
+        ...m,
+        quantity: qty,
+        balance: runningBalance
+      };
+    });
+  } catch (err) {
+    console.error('getItemLedger error:', err);
+    return [];
+  }
+}
+
+export async function getFinancialSummary(companyId: string) {
+  const cId = requireTenant(companyId);
+  try {
+    const accs = await db.select().from(accounts).where(eq(accounts.companyId, cId));
+    
+    const summary = {
+      totalAssets: 0,
+      totalLiabilities: 0,
+      totalEquity: 0,
+      totalRevenue: 0,
+      totalExpense: 0,
+      netProfit: 0
+    };
+
+    accs.forEach(acc => {
+      const balance = Number(acc.balance || 0);
+      if (acc.type === 'ASSET') summary.totalAssets += balance;
+      else if (acc.type === 'LIABILITY') summary.totalLiabilities += balance;
+      else if (acc.type === 'EQUITY') summary.totalEquity += balance;
+      else if (acc.type === 'REVENUE') summary.totalRevenue += balance;
+      else if (acc.type === 'EXPENSE') summary.totalExpense += balance;
+    });
+
+    summary.netProfit = summary.totalRevenue - summary.totalExpense;
+    return summary;
+  } catch (err) {
+    console.error('getFinancialSummary error:', err);
+    return null;
+  }
+}
+
+export async function getBOMs(companyId: string) {
+  const cId = requireTenant(companyId);
+  try {
+    const boms = await db.select().from(billsOfMaterials).where(eq(billsOfMaterials.companyId, cId));
+    const fullBoms = [];
+    for (const bom of boms) {
+      const items = await db.select().from(bomItems).where(eq(bomItems.bomId, bom.id));
+      fullBoms.push({ ...bom, items });
+    }
+    return fullBoms;
+  } catch (err) {
+    console.error('getBOMs error:', err);
+    return [];
+  }
+}
+
+export async function createBOM(companyId: string, bomData: {
+  productId: string;
+  name: string;
+  items: { productId: string; quantity: number; unitCost: number }[];
+}) {
+  const cId = requireTenant(companyId);
+  const bomId = `bom_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+  
+  let totalCost = 0;
+  bomData.items.forEach(it => totalCost += (it.quantity * it.unitCost));
+
+  return await db.transaction(async (tx) => {
+    await tx.insert(billsOfMaterials).values({
+      id: bomId,
+      companyId: cId,
+      productId: bomData.productId,
+      name: bomData.name,
+      totalCost: String(totalCost)
+    });
+
+    for (const item of bomData.items) {
+      await tx.insert(bomItems).values({
+        id: `bitm_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+        bomId,
+        productId: item.productId,
+        quantity: String(item.quantity),
+        unitCost: String(item.unitCost)
+      });
+    }
+    return bomId;
+  });
+}
+
+// ----------------------------------------------------
+// HR & PAYROLL FUNCTIONS
+// ----------------------------------------------------
+
+export async function getEmployees(companyId: string) {
+  const cId = requireTenant(companyId);
+  return await db.select().from(employees).where(eq(employees.companyId, cId));
+}
+
+export async function createEmployee(companyId: string, data: any) {
+  const cId = requireTenant(companyId);
+  const id = `emp_${Date.now()}`;
+  await db.insert(employees).values({ ...data, id, companyId: cId });
+  return id;
+}
+
+export async function getPayroll(companyId: string) {
+  const cId = requireTenant(companyId);
+  // Simple join or filtering for the company
+  const allEmployees = await db.select().from(employees).where(eq(employees.companyId, cId));
+  const empIds = allEmployees.map(e => e.id);
+  if (empIds.length === 0) return [];
+  return await db.select().from(payroll).where(sql`${payroll.employeeId} IN (${sql.join(empIds, sql`, `)})`);
+}
+
+// ----------------------------------------------------
+// CRM FUNCTIONS
+// ----------------------------------------------------
+
+export async function getCustomerInteractions(customerId: string) {
+  return await db.select().from(customerInteractions).where(eq(customerInteractions.customerId, customerId)).orderBy(desc(customerInteractions.date));
+}
+
+export async function addCustomerInteraction(data: any) {
+  const id = `int_${Date.now()}`;
+  await db.insert(customerInteractions).values({ ...data, id });
+  return id;
+}
+
+export async function getLoyaltyPoints(customerId: string) {
+  const res = await db.select().from(loyaltyPoints).where(eq(loyaltyPoints.customerId, customerId));
+  return res[0] || { points: 0 };
+}
+
+// ----------------------------------------------------
+// AI CO-PILOT FUNCTIONS
+// ----------------------------------------------------
+
+export async function getAiConfig(companyId: string) {
+  const cId = requireTenant(companyId);
+  const res = await db.select().from(aiConfigs).where(eq(aiConfigs.companyId, cId));
+  return res[0] || null;
+}
+
+export async function updateAiConfig(companyId: string, isEnabled: boolean, licenseKey?: string) {
+  const cId = requireTenant(companyId);
+  const existing = await getAiConfig(cId);
+  if (existing) {
+    await db.update(aiConfigs).set({ isEnabled, licenseKey, updatedAt: new Date() }).where(eq(aiConfigs.companyId, cId));
+  } else {
+    await db.insert(aiConfigs).values({
+      id: `aicf_${Date.now()}`,
+      companyId: cId,
+      isEnabled,
+      licenseKey: licenseKey || ''
+    });
+  }
+}
+
+export async function getUserAiMemory(userId: string) {
+  const res = await db.select().from(userAiMemories).where(eq(userAiMemories.userId, userId));
+  return res[0] || null;
+}
+
+export async function updateUserAiMemory(userId: string, data: any) {
+  const existing = await getUserAiMemory(userId);
+  if (existing) {
+    await db.update(userAiMemories).set({ ...data, lastInteractionAt: new Date() }).where(eq(userAiMemories.userId, userId));
+  } else {
+    await db.insert(userAiMemories).values({
+      id: `aimem_${Date.now()}`,
+      userId,
+      ...data
+    });
+  }
+}
+
+export async function logSystemTelemetry(type: string, component: string, message: string, severity: string = 'LOW', metadata: any = {}) {
+  await db.insert(systemTelemetry).values({
+    id: `tel_${Date.now()}`,
+    type,
+    component,
+    message,
+    severity,
+    metadata
+  });
+}
+
+export async function getSystemTelemetry(limit: number = 50) {
+  return await db.select().from(systemTelemetry).orderBy(desc(systemTelemetry.createdAt)).limit(limit);
+}
+
+// ----------------------------------------------------
+// DYNAMIC ENGINE CONFIGURATION
+// ----------------------------------------------------
+
+export async function getCompanyModuleOverrides(companyId: string) {
+  const cId = requireTenant(companyId);
+  return await db.select().from(companyModuleOverrides).where(eq(companyModuleOverrides.companyId, cId));
+}
+
+export async function setCompanyModuleOverride(companyId: string, moduleName: string, isEnabled: boolean, updatedBy: string) {
+  const cId = requireTenant(companyId);
+  // Module Dependencies Validation
+  const dependencies: Record<string, string[]> = {
+    'POS': ['SALES', 'INVENTORY'],
+    'SALES': ['INVENTORY'],
+    'PURCHASES': ['INVENTORY']
+  };
+
+  const existingConfig = await getCompanyModuleOverrides(cId);
+  const enabledModules = new Set(existingConfig.filter(m => m.isEnabled).map(m => m.moduleName));
+  
+  if (isEnabled) {
+    // Check if dependencies are met
+    const deps = dependencies[moduleName] || [];
+    for (const dep of deps) {
+      if (!enabledModules.has(dep)) {
+        throw new Error(`Cannot enable ${moduleName}. Missing dependency: ${dep}`);
+      }
+    }
+  } else {
+    // Check if other enabled modules depend on this
+    for (const [mod, deps] of Object.entries(dependencies)) {
+      if (enabledModules.has(mod) && deps.includes(moduleName) && mod !== moduleName) {
+         throw new Error(`Cannot disable ${moduleName}. It is required by active module: ${mod}`);
+      }
+    }
+  }
+
+  const existing = existingConfig.find(m => m.moduleName === moduleName);
+  if (existing) {
+    await db.update(companyModuleOverrides)
+      .set({ isEnabled, updatedAt: new Date(), updatedBy })
+      .where(and(eq(companyModuleOverrides.companyId, cId), eq(companyModuleOverrides.moduleName, moduleName)));
+  } else {
+    await db.insert(companyModuleOverrides).values({
+      id: `cmo_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+      companyId: cId,
+      moduleName,
+      isEnabled,
+      updatedBy
+    });
+  }
+}
+
+export async function getBranchModuleOverrides(branchId: string) {
+  return await db.select().from(branchModuleOverrides).where(eq(branchModuleOverrides.branchId, branchId));
+}
+
+export async function setBranchModuleOverride(branchId: string, moduleName: string, isEnabled: boolean, updatedBy: string) {
+  const existing = await db.select().from(branchModuleOverrides)
+    .where(and(eq(branchModuleOverrides.branchId, branchId), eq(branchModuleOverrides.moduleName, moduleName)));
+  
+  if (existing.length > 0) {
+    await db.update(branchModuleOverrides)
+      .set({ isEnabled, updatedAt: new Date(), updatedBy })
+      .where(and(eq(branchModuleOverrides.branchId, branchId), eq(branchModuleOverrides.moduleName, moduleName)));
+  } else {
+    await db.insert(branchModuleOverrides).values({
+      id: `bmo_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+      branchId,
+      moduleName,
+      isEnabled,
+      updatedBy
+    });
+  }
+}
+
+export async function getCustomFieldDefinitions(companyId: string, entityType?: string) {
+  const cId = requireTenant(companyId);
+  if (entityType) {
+    return await db.select().from(customFieldDefinitions)
+      .where(and(eq(customFieldDefinitions.companyId, cId), eq(customFieldDefinitions.entityType, entityType)));
+  }
+  return await db.select().from(customFieldDefinitions).where(eq(customFieldDefinitions.companyId, cId));
+}
+
+export async function createCustomFieldDefinition(companyId: string, data: any) {
+  const cId = requireTenant(companyId);
+  await db.insert(customFieldDefinitions).values({
+    id: `cfd_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+    companyId: cId,
+    entityType: data.entityType,
+    fieldKey: data.fieldKey,
+    label: data.label,
+    dataType: data.dataType,
+    isRequired: data.isRequired || false,
+    optionsJson: data.optionsJson || []
+  });
+}
+
+// END_OF_REPOSITORY_FUNCTIONS
+
+export async function softDeleteEntity(
+  companyId: string,
+  entityType: 'customers' | 'suppliers' | 'products' | 'categories' | 'branches',
+  entityId: string
+) {
+  const cId = requireTenant(companyId);
+  return await db.transaction(async (tx) => {
+    // 1. Check Financial History
+    let hasHistory = false;
+    if (entityType === 'customers') {
+      const salesRes = await tx.select().from(sales).where(and(eq(sales.customerId, entityId), eq(sales.companyId, cId))).limit(1);
+      const transRes = await tx.select().from(customerTransactions).where(and(eq(customerTransactions.customerId, entityId), eq(customerTransactions.companyId, cId))).limit(1);
+      if (salesRes.length > 0 || transRes.length > 0) hasHistory = true;
+    } else if (entityType === 'suppliers') {
+      const purRes = await tx.select().from(purchases).where(and(eq(purchases.supplierId, entityId), eq(purchases.companyId, cId))).limit(1);
+      const transRes = await tx.select().from(supplierTransactions).where(and(eq(supplierTransactions.supplierId, entityId), eq(supplierTransactions.companyId, cId))).limit(1);
+      if (purRes.length > 0 || transRes.length > 0) hasHistory = true;
+    } else if (entityType === 'products') {
+      const invRes = await tx.select().from(inventoryMovements).where(and(eq(inventoryMovements.productId, entityId), eq(inventoryMovements.companyId, cId))).limit(1);
+      if (invRes.length > 0) hasHistory = true;
+    }
+
+    if (hasHistory) {
+      throw new Error('RECORD_HAS_FINANCIAL_HISTORY');
+    }
+
+    // 2. Perform Soft Delete (Deactivate)
+    const table = entityType === 'customers' ? customers : 
+                  entityType === 'suppliers' ? suppliers :
+                  entityType === 'products' ? products :
+                  entityType === 'categories' ? categories : branches;
+
+    await tx.update(table).set({ isActive: false }).where(and(eq(table.id, entityId), eq(table.companyId, cId)));
+    
+    return true;
+  });
+}
+
 export async function deletePurchaseReturnTransaction(returnId: string, companyId: string) {
   const cId = requireTenant(companyId);
   return await db.transaction(async (tx) => {
@@ -1595,5 +2126,29 @@ export async function deletePurchaseReturnTransaction(returnId: string, companyI
 
     return true;
   });
+}
+
+export async function hasPermission(userId: string, companyId: string, permission: string): Promise<boolean> {
+  const perms = await db
+    .select()
+    .from(userPermissions)
+    .where(and(eq(userPermissions.userId, userId), eq(userPermissions.companyId, companyId), eq(userPermissions.permissionKey, permission)));
+  return perms.length > 0;
+}
+
+export async function getPriceForCustomer(productId: string, customerId: string, companyId: string): Promise<string> {
+  const cId = requireTenant(companyId);
+  // Get customer price level
+  const cust = await db.select().from(customers).where(and(eq(customers.id, customerId), eq(customers.companyId, cId))).limit(1);
+  const level = cust.length > 0 ? (cust[0].priceLevel || 'RETAIL') : 'RETAIL';
+  
+  // Get product price
+  const pRes = await db.select().from(productPrices).where(and(eq(productPrices.productId, productId), eq(productPrices.companyId, cId), eq(productPrices.priceLevel, level))).limit(1);
+  
+  if (pRes.length > 0) return pRes[0].price;
+  
+  // Fallback to product retail price
+  const prod = await db.select().from(products).where(and(eq(products.id, productId), eq(products.companyId, cId))).limit(1);
+  return prod.length > 0 ? prod[0].price : '0';
 }
 
