@@ -360,6 +360,10 @@ export interface AppUser {
   email?: string;
   pin: string;
   role: UserRole;
+  employeeCode?: string;
+  employeeCardId?: string;
+  cardStatus?: 'ACTIVE' | 'DISABLED';
+  status?: 'ACTIVE' | 'DISABLED' | 'INACTIVE';
   cashierType?: 'retail' | 'wholesale'; // نوع الكاشير
   treasuryId?: string;
   treasuryName?: string;
@@ -374,4 +378,15 @@ export interface AppUser {
   canGiveDiscount?: boolean;
   maxDiscountPercentage?: number;
 }
+
+export interface AuditLog {
+  id: string;
+  companyId: string;
+  userId?: string;
+  branchId?: string;
+  action: string;
+  details?: any;
+  createdAt?: string;
+}
+
 

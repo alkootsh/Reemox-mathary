@@ -44,11 +44,43 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
 
 // Helper to retrieve authentic Authorization Headers
 let cachedClientToken: { token: string; expiresAt: number } | null = null;
+let activeCardSessionToken: string | null = null;
+
+export function setCardSessionToken(token: string | null) {
+  activeCardSessionToken = token;
+  try {
+    if (token) {
+      sessionStorage.setItem('maro_card_session_token', token);
+    } else {
+      sessionStorage.removeItem('maro_card_session_token');
+    }
+  } catch (e) {
+    // Ignore storage restrictions
+  }
+}
+
+export function getCardSessionToken(): string | null {
+  if (!activeCardSessionToken) {
+    try {
+      activeCardSessionToken = sessionStorage.getItem('maro_card_session_token');
+    } catch (e) {
+      // Ignore storage restrictions
+    }
+  }
+  return activeCardSessionToken;
+}
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json'
   };
+
+  const cardToken = getCardSessionToken();
+  if (cardToken) {
+    headers['Authorization'] = `Bearer ${cardToken}`;
+    return headers;
+  }
+
   if (auth.currentUser) {
     try {
       const now = Date.now();
@@ -676,8 +708,102 @@ export async function saveUser(userData: Partial<AppUser>, companyId: string = D
   return res && res.id ? res.id : '';
 }
 
-export async function deleteUser(id: string): Promise<void> {
-  // Safe operation via PostgreSQL
+export async function updateUserCard(
+  userId: string, 
+  cardData: { employeeCardId?: string | null; cardStatus?: 'ACTIVE' | 'DISABLED'; employeeCode?: string },
+  companyId: string = DEFAULT_COMPANY_ID
+): Promise<{ success: boolean; user?: AppUser; error?: string }> {
+  try {
+    const authHeaders = await getAuthHeaders();
+    const res = await fetch(`/api/users/${encodeURIComponent(userId)}/card`, {
+      method: 'PUT',
+      headers: {
+        ...authHeaders,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(cardData)
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      return { success: false, error: data.error || 'فشل تحديث بيانات كارت الموظف' };
+    }
+    return { success: true, user: data.user };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'خطأ في الاتصال بالخادم' };
+  }
+}
+
+export async function deleteUser(id: string, companyId: string = DEFAULT_COMPANY_ID): Promise<boolean> {
+  try {
+    const res = await apiFetch<{ success: boolean }>(`/api/users/${encodeURIComponent(id)}?companyId=${companyId}`, {
+      method: 'DELETE'
+    });
+    return !!res?.success;
+  } catch (err) {
+    console.error('Delete user error:', err);
+    return false;
+  }
+}
+
+export async function cardLogin(employeeCardId: string): Promise<{ 
+  success: boolean; 
+  token?: string; 
+  user?: AppUser; 
+  tenantContext?: { companyId: string; branchId?: string; role: string };
+  error?: string 
+}> {
+  try {
+    const res = await fetch('/api/auth/card-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ employeeCardId })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return { 
+        success: false, 
+        error: data.error || 'فشل تسجيل الدخول بالكارت' 
+      };
+    }
+    if (data.token) {
+      setCardSessionToken(data.token);
+    }
+    return {
+      success: true,
+      token: data.token,
+      user: data.user,
+      tenantContext: data.tenantContext
+    };
+  } catch (err: any) {
+    return { 
+      success: false, 
+      error: err?.message || 'تعذر الاتصال بالخادم لمصادقة الكارت' 
+    };
+  }
+}
+
+export async function getAuditLogs(companyId: string = DEFAULT_COMPANY_ID, limit: number = 200): Promise<any[]> {
+  try {
+    const data = await apiFetch<any[]>(`/api/audit-logs?companyId=${companyId}&limit=${limit}`);
+    return data || [];
+  } catch (err) {
+    console.error('Failed to get audit logs:', err);
+    return [];
+  }
+}
+
+export async function logoutUser(reason?: string): Promise<void> {
+  try {
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: await getAuthHeaders(),
+      body: JSON.stringify({ reason: reason || 'Manual logout' })
+    });
+  } catch (e) {
+    // Ignore network error on logout
+  } finally {
+    setCardSessionToken(null);
+  }
 }
 
 export async function seedInitialData(companyId: string = DEFAULT_COMPANY_ID): Promise<void> {

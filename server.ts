@@ -1,6 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
+import crypto from "crypto";
 import { createServer as createViteServer } from "vite";
 import nodemailer from 'nodemailer';
 import twilio from "twilio";
@@ -12,7 +13,7 @@ import "dotenv/config";
 import {
     getCompanies, getCompanyById, saveCompany,
     getBranches, saveBranch,
-    getUsers, saveUser,
+    getUsers, saveUser, getUserById, getUserByCardId, updateUserCard, deleteUser,
     getMemberships, saveMembership,
     getCategories, saveCategory, deleteCategory,
     getProducts, saveProduct, deleteProduct, getProductById,
@@ -27,7 +28,8 @@ import {
     getNextSequence, resetDatabase,
     getUnits, saveUnit, deleteUnit,
     getSaleReturns, createSaleReturnTransaction, deleteSaleReturnTransaction,
-    getPurchaseReturns, createPurchaseReturnTransaction, deletePurchaseReturnTransaction
+    getPurchaseReturns, createPurchaseReturnTransaction, deletePurchaseReturnTransaction,
+    logAuditEvent, getAuditLogs, runStartupMigrations
 } from "./src/db/repository.ts";
 import { runMigration } from "./scripts/migrateFirestoreToPostgres.ts";
 import { db } from "./src/db/index.ts";
@@ -158,7 +160,35 @@ async function sendEmailNotification(to: string, subject: string, message: strin
     }
 }
 
+// Card Session Signing Secret
+const CARD_SESSION_SECRET = process.env.CARD_SESSION_SECRET || 'maro_erp_card_secret_key_2026_secure';
+
+function signCardSessionToken(payload: { userId: string; uid: string; email: string; name: string; companyId: string; branchId: string; role: string; employeeCardId: string }): string {
+    const dataStr = Buffer.from(JSON.stringify({ ...payload, ts: Date.now() })).toString('base64url');
+    const signature = crypto.createHmac('sha256', CARD_SESSION_SECRET).update(dataStr).digest('base64url');
+    return `card_sess_${dataStr}.${signature}`;
+}
+
+function verifyCardSessionToken(token: string): { userId: string; uid: string; email: string; name: string; companyId: string; branchId: string; role: string; employeeCardId: string } | null {
+    if (!token.startsWith('card_sess_')) return null;
+    const raw = token.slice('card_sess_'.length);
+    const parts = raw.split('.');
+    if (parts.length !== 2) return null;
+    const [dataStr, signature] = parts;
+    const expectedSig = crypto.createHmac('sha256', CARD_SESSION_SECRET).update(dataStr).digest('base64url');
+    if (signature !== expectedSig) return null;
+    try {
+        const payload = JSON.parse(Buffer.from(dataStr, 'base64url').toString('utf-8'));
+        return payload;
+    } catch (e) {
+        return null;
+    }
+}
+
 async function startServer() {
+    // Run PostgreSQL Schema Migrations
+    await runStartupMigrations();
+
     const app = express();
     const PORT = 3000;
 
@@ -168,10 +198,127 @@ async function startServer() {
     const tokenVerificationCache = new Map<string, { uid: string; email: string; expiresAt: number }>();
 
     // ====================================================
+    // PUBLIC AUTH ENDPOINTS (Before RBAC checks)
+    // ====================================================
+    
+    // Employee Card ID Login Endpoint
+    app.post("/api/auth/card-login", async (req, res) => {
+        try {
+            const rawCard = req.body.cardId || req.body.employeeCardId;
+            if (!rawCard || typeof rawCard !== 'string' || !rawCard.trim()) {
+                return res.status(400).json({ success: false, error: "رقم كارت الموظف مطلوب (Card ID is required)" });
+            }
+
+            const cleanCard = rawCard.trim();
+            const user = await getUserByCardId(cleanCard);
+
+            if (!user) {
+                // Log failed login audit
+                await logAuditEvent({
+                    companyId: 'company_default',
+                    action: 'CARD_LOGIN_FAILED',
+                    details: { 
+                        reason: 'CARD_NOT_FOUND', 
+                        cardIdMasked: cleanCard.length > 4 ? `***${cleanCard.slice(-4)}` : '***' 
+                    }
+                });
+                return res.status(401).json({ success: false, error: "كارت الموظف غير مسجل بالنظام (Card not found)" });
+            }
+
+            // Check card status
+            if (user.cardStatus === 'DISABLED') {
+                await logAuditEvent({
+                    companyId: user.companyId || 'company_default',
+                    userId: user.id,
+                    branchId: user.branchId || undefined,
+                    action: 'CARD_LOGIN_FAILED',
+                    details: { reason: 'CARD_DISABLED', employeeName: user.name, employeeCode: user.employeeCode }
+                });
+                return res.status(403).json({ success: false, error: "كارت الموظف معطل حالياً، يرجى مراجعة إدارة النظام" });
+            }
+
+            // Check employee status
+            if (user.status === 'DISABLED' || user.status === 'INACTIVE') {
+                await logAuditEvent({
+                    companyId: user.companyId || 'company_default',
+                    userId: user.id,
+                    branchId: user.branchId || undefined,
+                    action: 'CARD_LOGIN_FAILED',
+                    details: { reason: 'EMPLOYEE_DISABLED', employeeName: user.name, employeeCode: user.employeeCode }
+                });
+                return res.status(403).json({ success: false, error: "حساب الموظف موقوف أو غير نشط" });
+            }
+
+            // Check membership in company
+            const memRows = await db.select().from(memberships).where(and(eq(memberships.companyId, user.companyId || 'company_default'), eq(memberships.uid, user.uid || user.id))).limit(1);
+            if (memRows.length > 0 && (memRows[0].status === 'DISABLED' || memRows[0].status === 'INACTIVE')) {
+                await logAuditEvent({
+                    companyId: user.companyId || 'company_default',
+                    userId: user.id,
+                    branchId: user.branchId || undefined,
+                    action: 'CARD_LOGIN_FAILED',
+                    details: { reason: 'MEMBERSHIP_DISABLED', employeeName: user.name }
+                });
+                return res.status(403).json({ success: false, error: "عضوية الموظف في الشركة موقوفة" });
+            }
+
+            const role = (memRows[0]?.role || user.role || 'cashier').toUpperCase();
+            const token = signCardSessionToken({
+                userId: user.id,
+                uid: user.uid || user.id,
+                email: user.email,
+                name: user.name,
+                companyId: user.companyId || 'company_default',
+                branchId: user.branchId || 'branch_main',
+                role,
+                employeeCardId: user.employeeCardId || cleanCard
+            });
+
+            // Log successful card login audit
+            await logAuditEvent({
+                companyId: user.companyId || 'company_default',
+                userId: user.id,
+                branchId: user.branchId || 'branch_main',
+                action: 'CARD_LOGIN_SUCCESS',
+                details: { 
+                    employeeName: user.name, 
+                    role, 
+                    employeeCode: user.employeeCode || null,
+                    loginTime: new Date().toISOString() 
+                }
+            });
+
+            res.json({
+                success: true,
+                token,
+                user: {
+                    id: user.id,
+                    uid: user.uid || user.id,
+                    name: user.name,
+                    email: user.email,
+                    username: user.email?.split('@')[0] || user.name,
+                    pin: user.pin || '1234',
+                    role: role.toLowerCase(),
+                    cashierType: user.cashierType || 'retail',
+                    companyId: user.companyId || 'company_default',
+                    branchId: user.branchId || 'branch_main',
+                    employeeCardId: user.employeeCardId,
+                    employeeCode: user.employeeCode,
+                    cardStatus: user.cardStatus,
+                    status: user.status
+                }
+            });
+        } catch (err: any) {
+            console.error('Card Login Error:', err);
+            res.status(500).json({ success: false, error: err?.message || 'Card login failed' });
+        }
+    });
+
+    // ====================================================
     // CENTRAL SECURITY, TENANT ISOLATION, & RBAC MIDDLEWARE
     // ====================================================
     app.use("/api/*", async (req, res, next) => {
-        if (req.method === "OPTIONS") {
+        if (req.method === "OPTIONS" || req.originalUrl === "/api/auth/card-login") {
             return next();
         }
 
@@ -183,10 +330,19 @@ async function startServer() {
 
         let uid = "test_uid_admin";
         let email = "admin@test.com";
+        let cardSessionPayload: any = null;
 
         if (token) {
             try {
-                if (token.startsWith("test-")) {
+                if (token.startsWith("card_sess_")) {
+                    cardSessionPayload = verifyCardSessionToken(token);
+                    if (cardSessionPayload) {
+                        uid = cardSessionPayload.uid || cardSessionPayload.userId;
+                        email = cardSessionPayload.email || "";
+                    } else {
+                        return res.status(401).json({ error: "Invalid or expired card session token" });
+                    }
+                } else if (token.startsWith("test-")) {
                     if (token === "test-admin-token") {
                         uid = "test_uid_admin";
                         email = "admin@test.com";
@@ -229,17 +385,27 @@ async function startServer() {
         }
 
         // Server-Side Tenant Context Resolution
-        let companyId = (req.query.companyId as string) || (req.body && req.body.companyId) || "company_default";
-        let branchId = "branch_main";
-        let role = "ADMIN"; // Default to ADMIN for preview users
+        let companyId = cardSessionPayload?.companyId || (req.query.companyId as string) || (req.body && req.body.companyId) || "company_default";
+        let branchId = cardSessionPayload?.branchId || "branch_main";
+        let role = cardSessionPayload?.role || "ADMIN";
 
         try {
             const userRecords = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
             if (userRecords.length > 0) {
-                companyId = userRecords[0].companyId || companyId;
-                branchId = userRecords[0].branchId || branchId;
-                role = userRecords[0].role || role;
-            } else {
+                const u = userRecords[0];
+                // Realtime check for disabled user or disabled card session
+                if (cardSessionPayload) {
+                    if (u.cardStatus === 'DISABLED') {
+                        return res.status(403).json({ error: "Forbidden: Employee card has been disabled" });
+                    }
+                    if (u.status === 'DISABLED' || u.status === 'INACTIVE') {
+                        return res.status(403).json({ error: "Forbidden: Employee account is deactivated" });
+                    }
+                }
+                companyId = u.companyId || companyId;
+                branchId = u.branchId || branchId;
+                role = u.role || role;
+            } else if (!cardSessionPayload) {
                 try {
                     await db.insert(users).values({
                         id: `usr_${uid}`,
@@ -266,9 +432,13 @@ async function startServer() {
 
             const membershipRecords = await db.select().from(memberships).where(eq(memberships.uid, uid)).limit(1);
             if (membershipRecords.length > 0) {
-                companyId = membershipRecords[0].companyId || companyId;
-                branchId = membershipRecords[0].branchId || branchId;
-                role = membershipRecords[0].role || role;
+                const m = membershipRecords[0];
+                if (cardSessionPayload && (m.status === 'DISABLED' || m.status === 'INACTIVE')) {
+                    return res.status(403).json({ error: "Forbidden: Employee membership is deactivated" });
+                }
+                companyId = m.companyId || companyId;
+                branchId = m.branchId || branchId;
+                role = m.role || role;
             }
         } catch (err) {
             console.error(`[Database Error] Tenant context lookup failed for UID ${uid}:`, err);
@@ -276,7 +446,7 @@ async function startServer() {
 
         // If query or body specified companyId and user is ADMIN, honor it
         const requestedCompany = (req.query.companyId as string) || (req.body && typeof req.body === 'object' && req.body.companyId);
-        if (requestedCompany && (role === "ADMIN" || companyId === "company_default")) {
+        if (requestedCompany && (role.toUpperCase() === "ADMIN" || companyId === "company_default")) {
             companyId = requestedCompany;
         }
 
@@ -595,9 +765,86 @@ async function startServer() {
         res.json(list);
     });
 
+    app.get("/api/users/:id", async (req, res) => {
+        const companyId = (req.query.companyId as string) || 'company_default';
+        const user = await getUserById(req.params.id, companyId);
+        if (!user) return res.status(404).json({ error: "User not found" });
+        res.json(user);
+    });
+
     app.post("/api/users", async (req, res) => {
         const id = await saveUser(req.body);
+        const userContext = (req as any).userContext;
+        await logAuditEvent({
+            companyId: req.body.companyId || userContext?.companyId || 'company_default',
+            userId: id,
+            branchId: req.body.branchId || userContext?.branchId,
+            action: 'USER_SAVED',
+            details: { name: req.body.name, role: req.body.role, employeeCardId: req.body.employeeCardId, savedBy: userContext?.uid }
+        });
         res.json({ success: true, id });
+    });
+
+    app.put("/api/users/:id/card", async (req, res) => {
+        try {
+            const userContext = (req as any).userContext;
+            const targetUserId = req.params.id;
+            const { employeeCardId, cardStatus, employeeCode } = req.body;
+
+            const existingUser = await getUserById(targetUserId, userContext?.role === 'ADMIN' ? undefined : userContext?.companyId);
+            if (!existingUser) {
+                return res.status(404).json({ success: false, error: "الموظف غير موجود" });
+            }
+
+            const updatedUser = await updateUserCard(targetUserId, {
+                employeeCardId,
+                cardStatus,
+                employeeCode
+            }, userContext?.companyId);
+
+            // Audit log
+            let auditAction = 'CARD_ASSIGNED';
+            if (employeeCardId === null || employeeCardId === '') auditAction = 'CARD_UNASSIGNED';
+            else if (cardStatus === 'DISABLED') auditAction = 'CARD_DISABLED';
+            else if (cardStatus === 'ACTIVE' && existingUser.cardStatus === 'DISABLED') auditAction = 'CARD_ENABLED';
+
+            await logAuditEvent({
+                companyId: updatedUser?.companyId || userContext?.companyId || 'company_default',
+                userId: targetUserId,
+                branchId: updatedUser?.branchId || userContext?.branchId,
+                action: auditAction,
+                details: {
+                    targetEmployeeName: updatedUser?.name,
+                    employeeCardId: updatedUser?.employeeCardId,
+                    cardStatus: updatedUser?.cardStatus,
+                    updatedBy: userContext?.uid
+                }
+            });
+
+            res.json({ success: true, user: updatedUser });
+        } catch (err: any) {
+            console.error('Update User Card Error:', err);
+            const status = err.message?.includes('مسجل بالفعل') ? 409 : 500;
+            res.status(status).json({ success: false, error: err?.message || 'Failed to update user card' });
+        }
+    });
+
+    app.delete("/api/users/:id", async (req, res) => {
+        try {
+            const userContext = (req as any).userContext;
+            const companyId = userContext?.companyId || (req.query.companyId as string) || 'company_default';
+            await deleteUser(req.params.id, companyId);
+            await logAuditEvent({
+                companyId,
+                userId: req.params.id,
+                action: 'USER_DELETED',
+                details: { deletedUserId: req.params.id, deletedBy: userContext?.uid }
+            });
+            res.json({ success: true });
+        } catch (err: any) {
+            console.error('Delete User Error:', err);
+            res.status(500).json({ success: false, error: err?.message || 'Failed to delete user' });
+        }
     });
 
     app.get("/api/memberships", async (req, res) => {
@@ -609,6 +856,43 @@ async function startServer() {
     app.post("/api/memberships", async (req, res) => {
         const id = await saveMembership(req.body);
         res.json({ success: true, id });
+    });
+
+    // Audit Logs & Auth Logout Endpoints
+    app.get("/api/audit-logs", async (req, res) => {
+        try {
+            const userContext = (req as any).userContext;
+            const companyId = userContext?.companyId || (req.query.companyId as string) || 'company_default';
+            const limit = req.query.limit ? parseInt(req.query.limit as string) : 200;
+            const logs = await getAuditLogs(companyId, limit);
+            res.json(logs);
+        } catch (err: any) {
+            console.error('Get Audit Logs Error:', err);
+            res.status(500).json({ success: false, error: err?.message || 'Failed to get audit logs' });
+        }
+    });
+
+    app.post("/api/auth/logout", async (req, res) => {
+        try {
+            const userContext = (req as any).userContext;
+            if (userContext) {
+                await logAuditEvent({
+                    companyId: userContext.companyId || 'company_default',
+                    userId: userContext.uid,
+                    branchId: userContext.branchId,
+                    action: 'LOGOUT',
+                    details: { 
+                        role: userContext.role, 
+                        reason: req.body?.reason || 'User initiated logout',
+                        logoutTime: new Date().toISOString() 
+                    }
+                });
+            }
+            res.json({ success: true });
+        } catch (err: any) {
+            console.error('Logout audit error:', err);
+            res.json({ success: true });
+        }
     });
 
     // 4. Categories & Products
@@ -1389,17 +1673,113 @@ async function startServer() {
                 await saveCompany({ id: "company_b", name: "Company B" });
 
                 // Save Users & Memberships
-                await saveUser({ id: "usr_test_admin", uid: "test_uid_admin", email: "admin@test.com", name: "Admin User", companyId: "company_a", role: "ADMIN" });
+                await saveUser({ 
+                    id: "usr_test_admin", 
+                    uid: "test_uid_admin", 
+                    email: "admin@test.com", 
+                    name: "Admin User", 
+                    companyId: "company_a", 
+                    role: "ADMIN",
+                    employeeCode: "EMP-ADM-001",
+                    employeeCardId: "CARD-ADMIN-001",
+                    cardStatus: "ACTIVE",
+                    status: "ACTIVE"
+                });
                 await saveMembership({ id: "memb_test_admin", uid: "test_uid_admin", userId: "usr_test_admin", companyId: "company_a", role: "ADMIN" });
 
-                await saveUser({ id: "usr_test_cashier", uid: "test_uid_cashier", email: "cashier@test.com", name: "Cashier User", companyId: "company_a", role: "CASHIER" });
+                await saveUser({ 
+                    id: "usr_test_cashier", 
+                    uid: "test_uid_cashier", 
+                    email: "cashier@test.com", 
+                    name: "Cashier User", 
+                    companyId: "company_a", 
+                    role: "CASHIER",
+                    employeeCode: "EMP-CSH-002",
+                    employeeCardId: "CARD-CASHIER-002",
+                    cardStatus: "ACTIVE",
+                    status: "ACTIVE"
+                });
                 await saveMembership({ id: "memb_test_cashier", uid: "test_uid_cashier", userId: "usr_test_cashier", companyId: "company_a", role: "CASHIER" });
 
-                await saveUser({ id: "usr_test_user_a", uid: "test_uid_user_a", email: "usera@test.com", name: "User A", companyId: "company_a", role: "MANAGER" });
+                await saveUser({ 
+                    id: "usr_test_disabled_card", 
+                    uid: "test_uid_disabled_card", 
+                    email: "disabledcard@test.com", 
+                    name: "Disabled Card User", 
+                    companyId: "company_a", 
+                    role: "CASHIER",
+                    employeeCode: "EMP-DIS-003",
+                    employeeCardId: "CARD-DISABLED-003",
+                    cardStatus: "DISABLED",
+                    status: "ACTIVE"
+                });
+                await saveMembership({ id: "memb_test_disabled_card", uid: "test_uid_disabled_card", userId: "usr_test_disabled_card", companyId: "company_a", role: "CASHIER" });
+
+                await saveUser({ 
+                    id: "usr_test_inactive_user", 
+                    uid: "test_uid_inactive_user", 
+                    email: "inactive@test.com", 
+                    name: "Inactive User", 
+                    companyId: "company_a", 
+                    role: "CASHIER",
+                    employeeCode: "EMP-INA-004",
+                    employeeCardId: "CARD-INACTIVE-004",
+                    cardStatus: "ACTIVE",
+                    status: "DISABLED"
+                });
+                await saveMembership({ id: "memb_test_inactive_user", uid: "test_uid_inactive_user", userId: "usr_test_inactive_user", companyId: "company_a", role: "CASHIER", status: "DISABLED" });
+
+                await saveUser({ id: "usr_test_user_a", uid: "test_uid_user_a", email: "usera@test.com", name: "User A", companyId: "company_a", role: "MANAGER", employeeCardId: "CARD-USER-A", cardStatus: "ACTIVE", status: "ACTIVE" });
                 await saveMembership({ id: "memb_test_user_a", uid: "test_uid_user_a", userId: "usr_test_user_a", companyId: "company_a", role: "MANAGER" });
 
-                await saveUser({ id: "usr_test_user_b", uid: "test_uid_user_b", email: "userb@test.com", name: "User B", companyId: "company_b", role: "MANAGER" });
+                await saveUser({ id: "usr_test_user_b", uid: "test_uid_user_b", email: "userb@test.com", name: "User B", companyId: "company_b", role: "MANAGER", employeeCardId: "CARD-USER-B", cardStatus: "ACTIVE", status: "ACTIVE" });
                 await saveMembership({ id: "memb_test_user_b", uid: "test_uid_user_b", userId: "usr_test_user_b", companyId: "company_b", role: "MANAGER" });
+
+                // Seed rich default users for company_default if not present
+                await saveUser({
+                    id: "usr_def_admin",
+                    uid: "usr_def_admin",
+                    email: "admin@maro-pos.local",
+                    name: "المدير العام",
+                    pin: "1234",
+                    role: "admin",
+                    companyId: "company_default",
+                    employeeCode: "EMP-001",
+                    employeeCardId: "CARD-ADMIN-999",
+                    cardStatus: "ACTIVE",
+                    status: "ACTIVE"
+                });
+                await saveMembership({ id: "memb_def_admin", uid: "usr_def_admin", userId: "usr_def_admin", companyId: "company_default", role: "ADMIN" });
+
+                await saveUser({
+                    id: "usr_def_cashier",
+                    uid: "usr_def_cashier",
+                    email: "cashier@maro-pos.local",
+                    name: "كاشير الصالة",
+                    pin: "0000",
+                    role: "cashier",
+                    companyId: "company_default",
+                    employeeCode: "EMP-002",
+                    employeeCardId: "CARD-CASHIER-101",
+                    cardStatus: "ACTIVE",
+                    status: "ACTIVE"
+                });
+                await saveMembership({ id: "memb_def_cashier", uid: "usr_def_cashier", userId: "usr_def_cashier", companyId: "company_default", role: "CASHIER" });
+
+                await saveUser({
+                    id: "usr_def_acc",
+                    uid: "usr_def_acc",
+                    email: "accountant@maro-pos.local",
+                    name: "المحاسب العام",
+                    pin: "1111",
+                    role: "accountant",
+                    companyId: "company_default",
+                    employeeCode: "EMP-003",
+                    employeeCardId: "CARD-ACC-202",
+                    cardStatus: "ACTIVE",
+                    status: "ACTIVE"
+                });
+                await saveMembership({ id: "memb_def_acc", uid: "usr_def_acc", userId: "usr_def_acc", companyId: "company_default", role: "MANAGER" });
 
                 // Save products for Cross-Tenant Object Access testing
                 await saveProduct({ id: "prod_a", companyId: "company_a", name: "Product A", price: 50, stock: 5 });

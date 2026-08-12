@@ -22,12 +22,13 @@ import { Category, Customer, Expense, Purchase, Sale, Product, Branch, Supplier,
 import LandingPage from './components/LandingPage';
 import MarketingPage from './components/MarketingPage';
 import ActivationPanel from './components/ActivationPanel';
-import { getCustomers, getSuppliers, getProducts, getSales, getPurchases, getExpenses, getUsers, seedInitialData, getBranches, getCashierSessions } from './lib/firestoreService';
-import { playSuccessSound, playWarningSound } from './lib/sound';
+import { getCustomers, getSuppliers, getProducts, getSales, getPurchases, getExpenses, getUsers, seedInitialData, getBranches, getCashierSessions, cardLogin, logoutUser } from './lib/firestoreService';
+import { playSuccessSound, playWarningSound, playAlertSound } from './lib/sound';
 import { getTrialStatus, TrialStatus } from './lib/license';
 import { useTenant } from './context/TenantContext';
 import { triggerLoginNotification } from './lib/notifications';
 import { CashierSession } from './types/types';
+import { CreditCard, KeyRound, ScanLine, ShieldCheck, ShieldAlert, Sparkles, LogIn, AlertCircle } from 'lucide-react';
 
 type Screen = 
   | 'landing' 
@@ -83,7 +84,13 @@ export default function App() {
     return safeParse(localStorage.getItem('currentUser'), null);
   });
 
-  // Login inputs
+  // Login mode: 'card' | 'credentials'
+  const [loginMode, setLoginMode] = useState<'card' | 'credentials'>('card');
+  const [cardIdInput, setCardIdInput] = useState('');
+  const [cardLoginLoading, setCardLoginLoading] = useState(false);
+  const [lastScannedCard, setLastScannedCard] = useState<string | null>(null);
+
+  // Login inputs (credentials mode)
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPin, setLoginPin] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
@@ -249,6 +256,91 @@ export default function App() {
 
   const [branches, setBranches] = useState<Branch[]>([{ id: 'default', name: 'الفرع الرئيسي' }]);
 
+  // Global Hardware Card Reader (Keyboard Wedge) listener on login screen
+  useEffect(() => {
+    if (currentUser) return;
+
+    let buffer = '';
+    let lastKeyTime = Date.now();
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const now = Date.now();
+      const diff = now - lastKeyTime;
+      lastKeyTime = now;
+
+      if (e.key === 'Enter') {
+        const trimmed = buffer.trim();
+        if (trimmed.length >= 2) {
+          e.preventDefault();
+          buffer = '';
+          handleCardLoginSubmit(trimmed);
+        } else {
+          buffer = '';
+        }
+        return;
+      }
+
+      if (e.key.length === 1) {
+        if (diff > 160) {
+          buffer = e.key;
+        } else {
+          buffer += e.key;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [currentUser]);
+
+  // Employee Card Login Submission via PostgreSQL Server API
+  const handleCardLoginSubmit = async (cardIdToUse?: string) => {
+    const cleanId = (cardIdToUse || cardIdInput).trim();
+    if (!cleanId) {
+      playWarningSound();
+      setLoginError('يرجى تمرير كارت الموظف أمام القارئ أو كتابة كود الكارت');
+      return;
+    }
+
+    setCardLoginLoading(true);
+    setLoginError(null);
+    setLastScannedCard(cleanId);
+
+    try {
+      const res = await cardLogin(cleanId);
+      if (!res.success || !res.user) {
+        playAlertSound();
+        setLoginError(res.error || 'كارت الموظف غير مسجل أو معطل في قاعدة بيانات PostgreSQL');
+        return;
+      }
+
+      const loggedUser = res.user;
+      playSuccessSound();
+      setCurrentUser(loggedUser);
+      setTenantCurrentUser(loggedUser);
+      localStorage.setItem('currentUser', JSON.stringify(loggedUser));
+
+      // Trigger automatic login notification to manager
+      triggerLoginNotification(loggedUser).catch(err => console.warn('Login notification failed:', err));
+
+      // Route based on role
+      if (loggedUser.role === 'cashier') {
+        setCurrentScreen('pos');
+      } else if (loggedUser.role === 'accountant') {
+        setCurrentScreen('accounting');
+      } else if (loggedUser.role === 'inventory_manager') {
+        setCurrentScreen('inventory');
+      } else {
+        setCurrentScreen('dashboard');
+      }
+    } catch (err: any) {
+      playAlertSound();
+      setLoginError(err?.message || 'تعذر الاتصال بخادم PostgreSQL لمصادقة كارت الموظف');
+    } finally {
+      setCardLoginLoading(false);
+    }
+  };
+
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError(null);
@@ -315,6 +407,7 @@ export default function App() {
     // Success login
     playSuccessSound();
     setCurrentUser(matchedUser);
+    setTenantCurrentUser(matchedUser);
     localStorage.setItem('currentUser', JSON.stringify(matchedUser));
 
     // Send automatic login notification (WhatsApp & Email) to Manager
@@ -334,6 +427,7 @@ export default function App() {
 
   const handleQuickLogin = (user: AppUser) => {
     setCurrentUser(user);
+    setTenantCurrentUser(user);
     localStorage.setItem('currentUser', JSON.stringify(user));
     playSuccessSound();
     if (user.role === 'cashier') {
@@ -347,10 +441,15 @@ export default function App() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await logoutUser('تسجيل خروج من واجهة البرنامج');
+    } catch (e) {}
     setCurrentUser(null);
+    setTenantCurrentUser(null);
     localStorage.removeItem('currentUser');
     setLoginPin('');
+    setCardIdInput('');
     setLoginError(null);
     playSuccessSound();
   };
@@ -416,111 +515,258 @@ export default function App() {
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-primary text-text-main flex items-center justify-center p-4">
-        <div className="bg-card border border-border p-8 rounded-3xl w-full max-w-md shadow-2xl space-y-6">
+        <div className="bg-card border border-border p-6 sm:p-8 rounded-3xl w-full max-w-lg shadow-2xl space-y-6">
+          {/* Brand Header */}
           <div className="text-center space-y-2">
-            <span className="text-4xl">🔐</span>
+            <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-gold/10 border border-gold/30 text-gold mb-1 shadow-inner">
+              <CreditCard className="w-8 h-8" />
+            </div>
             <h1 className="text-2xl font-black text-gold">تسجيل الدخول - نظام MARO المحاسبي</h1>
-            <p className="text-xs text-text-dim">أدخل اسم الموظف وكلمة المرور للدخول حسب الصلاحيات</p>
+            <p className="text-xs text-text-dim">المصادقة الآمنة عبر خادم PostgreSQL وصلاحيات كروت الموظفين</p>
+          </div>
+
+          {/* Login Mode Tabs */}
+          <div className="grid grid-cols-2 gap-2 bg-card2 p-1.5 rounded-2xl border border-border">
+            <button
+              type="button"
+              onClick={() => { setLoginMode('card'); setLoginError(null); }}
+              className={`flex items-center justify-center gap-2 py-2.5 rounded-xl font-bold text-xs transition-all ${
+                loginMode === 'card'
+                  ? 'bg-gold text-white shadow-md'
+                  : 'text-text-dim hover:text-white'
+              }`}
+            >
+              <CreditCard className="w-4 h-4" />
+              <span>كارت ID الموظف</span>
+              <span className="w-2 h-2 rounded-full bg-green-400 animate-ping"></span>
+            </button>
+            <button
+              type="button"
+              onClick={() => { setLoginMode('credentials'); setLoginError(null); }}
+              className={`flex items-center justify-center gap-2 py-2.5 rounded-xl font-bold text-xs transition-all ${
+                loginMode === 'credentials'
+                  ? 'bg-gold text-white shadow-md'
+                  : 'text-text-dim hover:text-white'
+              }`}
+            >
+              <KeyRound className="w-4 h-4" />
+              <span>الاسم ورمز PIN</span>
+            </button>
           </div>
 
           {loginError && (
-            <div className="bg-danger/20 border border-danger/40 p-3 rounded-2xl text-xs text-danger font-bold text-center animate-shake">
-              ⚠️ {loginError}
+            <div className="bg-danger/20 border border-danger/40 p-3 rounded-2xl text-xs text-danger font-bold text-center flex items-center justify-center gap-2 animate-shake">
+              <AlertCircle className="w-4 h-4 flex-shrink-0" />
+              <span>{loginError}</span>
             </div>
           )}
 
-          <form onSubmit={handleLogin} className="space-y-4">
-            <div>
-              <label className="block text-xs font-bold mb-1.5">اختر الموظف أو اكتب اسم الدخول: *</label>
-              <div className="space-y-2">
-                {registeredUsers.length > 0 && (
-                  <select
-                    className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm font-bold text-gold"
-                    value={loginUsername || ''}
-                    onChange={e => {
-                      const selectedVal = e.target.value;
-                      setLoginUsername(selectedVal);
-                      setLoginError(null);
-                      const found = registeredUsers.find(u => u.username === selectedVal || u.name === selectedVal);
-                      if (found) {
-                        const defaultPin = found.pin || (found.role === 'admin' ? '1234' : found.role === 'cashier' ? '0000' : '1111');
-                        if (!loginPin) setLoginPin(defaultPin);
-                      }
-                    }}
+          {/* TAB 1: EMPLOYEE CARD LOGIN */}
+          {loginMode === 'card' && (
+            <div className="space-y-5">
+              {/* Animated Smart Card Visual */}
+              <div className="relative overflow-hidden bg-gradient-to-br from-secondary via-card to-card2 border border-gold/30 rounded-2xl p-5 shadow-lg">
+                <div className="flex justify-between items-start mb-3">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-green-400 animate-pulse"></span>
+                    <span className="text-[11px] font-black text-green-400">قارئ الكروت متصل وجاهز للمسح</span>
+                  </div>
+                  <ScanLine className="w-5 h-5 text-gold animate-pulse" />
+                </div>
+
+                <div className="flex items-center gap-4 my-2">
+                  <div className="w-12 h-9 rounded-md bg-amber-400/20 border border-amber-400/40 flex items-center justify-center">
+                    <div className="w-7 h-5 border border-amber-300/60 rounded flex flex-col justify-around p-0.5">
+                      <div className="h-0.5 bg-amber-300/60 rounded"></div>
+                      <div className="h-0.5 bg-amber-300/60 rounded"></div>
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-sm font-bold text-white">مرر كارت الموظف أمام القارئ</div>
+                    <div className="text-[11px] text-text-dim">RFID • Barcode • Magnetic Swipe</div>
+                  </div>
+                </div>
+
+                <div className="mt-3 pt-3 border-t border-border/60 flex items-center justify-between text-[10px] text-text-dim">
+                  <span>Server-Side Authentication</span>
+                  <span className="font-mono text-gold font-bold">PostgreSQL Security</span>
+                </div>
+              </div>
+
+              {/* Manual / USB Wedge Input */}
+              <form onSubmit={(e) => { e.preventDefault(); handleCardLoginSubmit(); }} className="space-y-3">
+                <div>
+                  <label className="block text-xs font-bold mb-1.5 text-text-dim">أو أدخل رقم / كود الكارت يدوياً:</label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      placeholder="مثال: CARD-CASHIER-101 أو كود الباركود"
+                      className="w-full bg-card2 border border-border p-3.5 pr-10 rounded-2xl text-sm font-mono tracking-wider focus:border-gold outline-none"
+                      value={cardIdInput}
+                      onChange={(e) => setCardIdInput(e.target.value)}
+                      autoFocus
+                    />
+                    <CreditCard className="w-5 h-5 text-text-dim absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={cardLoginLoading}
+                  className="w-full bg-gold hover:bg-gold2 text-white p-3.5 rounded-2xl font-bold shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  {cardLoginLoading ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                      <span>جاري التحقق من خادم PostgreSQL...</span>
+                    </>
+                  ) : (
+                    <>
+                      <LogIn className="w-4 h-4" />
+                      <span>دخول بالكارت الذكي</span>
+                    </>
+                  )}
+                </button>
+              </form>
+
+              {/* Pre-seeded Test Cards */}
+              <div className="border-t border-border pt-3 space-y-2">
+                <p className="text-[11px] text-text-dim text-center font-bold">كروت موظفين مسجلة بالنظام للتجربة:</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleCardLoginSubmit('CARD-ADMIN-999')}
+                    className="bg-red-500/10 border border-red-500/30 text-red-400 p-2 rounded-xl text-xs font-bold hover:bg-red-500/20 transition-all text-right flex flex-col gap-0.5"
                   >
-                    <option value="">-- اختر الموظف من القائمة --</option>
-                    {registeredUsers.map(u => (
-                      <option key={u.id} value={u.username || ''}>
-                        {u.name} ({u.role === 'admin' ? 'مدير' : u.role === 'cashier' ? 'كاشير' : u.role === 'accountant' ? 'محاسب' : 'مخازن'})
-                      </option>
-                    ))}
-                  </select>
-                )}
-                <input
-                  type="text"
-                  placeholder="أو اكتب اسم المستخدم (أو اختر من القائمة أصل)"
-                  className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm"
-                  value={loginUsername || ''}
-                  onChange={e => {
-                    setLoginUsername(e.target.value);
-                    setLoginError(null);
-                  }}
-                  required
-                />
+                    <span>👑 كارت المدير العام</span>
+                    <span className="text-[10px] font-mono opacity-75">CARD-ADMIN-999</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleCardLoginSubmit('CARD-CASHIER-101')}
+                    className="bg-green-500/10 border border-green-500/30 text-green-400 p-2 rounded-xl text-xs font-bold hover:bg-green-500/20 transition-all text-right flex flex-col gap-0.5"
+                  >
+                    <span>🛒 كارت الكاشير</span>
+                    <span className="text-[10px] font-mono opacity-75">CARD-CASHIER-101</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleCardLoginSubmit('CARD-ACC-202')}
+                    className="bg-blue-500/10 border border-blue-500/30 text-blue-400 p-2 rounded-xl text-xs font-bold hover:bg-blue-500/20 transition-all text-right flex flex-col gap-0.5"
+                  >
+                    <span>📊 كارت المحاسب</span>
+                    <span className="text-[10px] font-mono opacity-75">CARD-ACC-202</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleCardLoginSubmit('CARD-INV-303')}
+                    className="bg-purple-500/10 border border-purple-500/30 text-purple-400 p-2 rounded-xl text-xs font-bold hover:bg-purple-500/20 transition-all text-right flex flex-col gap-0.5"
+                  >
+                    <span>📦 كارت أمين المخزن</span>
+                    <span className="text-[10px] font-mono opacity-75">CARD-INV-303</span>
+                  </button>
+                </div>
               </div>
             </div>
+          )}
 
-            <div>
-              <label className="block text-xs font-bold mb-1.5">كلمة المرور / الرمز السري (PIN): *</label>
-              <input
-                type="password"
-                placeholder="أدخل الرمز السري (الافتراضي: 1234 للمدير، 0000 للكاشير)"
-                className="w-full bg-card2 border border-border p-3.5 rounded-2xl text-sm text-center tracking-widest font-mono"
-                value={loginPin || ''}
-                onChange={e => {
-                  setLoginPin(e.target.value);
-                  setLoginError(null);
-                }}
-                required
-              />
+          {/* TAB 2: USERNAME + PIN LOGIN */}
+          {loginMode === 'credentials' && (
+            <div className="space-y-4">
+              <form onSubmit={handleLogin} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold mb-1.5">اختر الموظف أو اكتب اسم الدخول: *</label>
+                  <div className="space-y-2">
+                    {registeredUsers.length > 0 && (
+                      <select
+                        className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm font-bold text-gold"
+                        value={loginUsername || ''}
+                        onChange={e => {
+                          const selectedVal = e.target.value;
+                          setLoginUsername(selectedVal);
+                          setLoginError(null);
+                          const found = registeredUsers.find(u => u.username === selectedVal || u.name === selectedVal);
+                          if (found) {
+                            const defaultPin = found.pin || (found.role === 'admin' ? '1234' : found.role === 'cashier' ? '0000' : '1111');
+                            if (!loginPin) setLoginPin(defaultPin);
+                          }
+                        }}
+                      >
+                        <option value="">-- اختر الموظف من القائمة --</option>
+                        {registeredUsers.map(u => (
+                          <option key={u.id} value={u.username || ''}>
+                            {u.name} ({u.role === 'admin' ? 'مدير' : u.role === 'cashier' ? 'كاشير' : u.role === 'accountant' ? 'محاسب' : 'مخازن'})
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <input
+                      type="text"
+                      placeholder="أو اكتب اسم المستخدم (أو اختر من القائمة أصل)"
+                      className="w-full bg-card2 border border-border p-3 rounded-2xl text-sm"
+                      value={loginUsername || ''}
+                      onChange={e => {
+                        setLoginUsername(e.target.value);
+                        setLoginError(null);
+                      }}
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold mb-1.5">كلمة المرور / الرمز السري (PIN): *</label>
+                  <input
+                    type="password"
+                    placeholder="أدخل الرمز السري (الافتراضي: 1234 للمدير، 0000 للكاشير)"
+                    className="w-full bg-card2 border border-border p-3.5 rounded-2xl text-sm text-center tracking-widest font-mono"
+                    value={loginPin || ''}
+                    onChange={e => {
+                      setLoginPin(e.target.value);
+                      setLoginError(null);
+                    }}
+                    required
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-gold text-white p-3.5 rounded-2xl font-bold shadow-lg hover:bg-gold2 transition-colors flex items-center justify-center gap-2"
+                >
+                  <LogIn className="w-4 h-4" />
+                  <span>دخول النظام</span>
+                </button>
+              </form>
+
+              {/* Quick Access Buttons */}
+              <div className="border-t border-border pt-4 space-y-2">
+                <p className="text-[11px] text-text-dim text-center font-bold">تسجيل دخول سريع للتجربة:</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => handleQuickLogin({ id: 'usr-admin', name: 'المدير العام', username: 'admin', pin: '1234', role: 'admin' })}
+                    className="bg-red-500/10 border border-red-500/30 text-red-400 p-2 rounded-xl text-xs font-bold hover:bg-red-500/20 transition-all text-center"
+                  >
+                    👑 دخول كـ مدير (Admin)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleQuickLogin({ id: 'usr-cashier', name: 'كاشير الفرع', username: 'cashier', pin: '0000', role: 'cashier' })}
+                    className="bg-green-500/10 border border-green-500/30 text-green-400 p-2 rounded-xl text-xs font-bold hover:bg-green-500/20 transition-all text-center"
+                  >
+                    🛒 دخول كـ كاشير (POS)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleQuickLogin({ id: 'usr-acc', name: 'المحاسب المالي', username: 'accountant', pin: '1111', role: 'accountant' })}
+                    className="bg-blue-500/10 border border-blue-500/30 text-blue-400 p-2 rounded-xl text-xs font-bold hover:bg-blue-500/20 transition-all text-center col-span-2"
+                  >
+                    📊 دخول كـ محاسب (Accountant)
+                  </button>
+                </div>
+              </div>
             </div>
-
-            <button
-              type="submit"
-              className="w-full bg-gold text-white p-3.5 rounded-2xl font-bold shadow-lg hover:bg-gold2 transition-colors flex items-center justify-center gap-2"
-            >
-              <span>🚀</span>
-              دخول النظام
-            </button>
-          </form>
-
-          {/* Quick Access Buttons for standard staff */}
-          <div className="border-t border-border pt-4 space-y-2">
-            <p className="text-[11px] text-text-dim text-center font-bold">تسجيل دخول سريع للتجربة:</p>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => handleQuickLogin({ id: 'usr-admin', name: 'المدير العام', username: 'admin', pin: '1234', role: 'admin' })}
-                className="bg-red-500/10 border border-red-500/30 text-red-400 p-2 rounded-xl text-xs font-bold hover:bg-red-500/20 transition-all text-center"
-              >
-                👑 دخول كـ مدير (Admin)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickLogin({ id: 'usr-cashier', name: 'كاشير الفرع', username: 'cashier', pin: '0000', role: 'cashier' })}
-                className="bg-green-500/10 border border-green-500/30 text-green-400 p-2 rounded-xl text-xs font-bold hover:bg-green-500/20 transition-all text-center"
-              >
-                🛒 دخول كـ كاشير (POS)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleQuickLogin({ id: 'usr-acc', name: 'المحاسب المالي', username: 'accountant', pin: '1111', role: 'accountant' })}
-                className="bg-blue-500/10 border border-blue-500/30 text-blue-400 p-2 rounded-xl text-xs font-bold hover:bg-blue-500/20 transition-all text-center col-span-2"
-              >
-                📊 دخول كـ محاسب (Accountant)
-              </button>
-            </div>
-          </div>
+          )}
         </div>
       </div>
     );
@@ -532,9 +778,20 @@ export default function App() {
       <div className="flex flex-wrap justify-between items-center px-4 py-2 bg-secondary border-b border-border text-xs sticky top-0 z-40 shadow-sm gap-2">
          <div className="flex items-center gap-2 flex-wrap">
            <span className="font-black text-gold text-sm tracking-wide">MARO ERP Lite</span>
-           <span className="bg-gold/20 text-gold px-2.5 py-0.5 rounded-full font-bold">
-             الموظف: {currentUser.name}
+           <span className="bg-gold/20 text-gold px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1">
+             <span>الموظف: {currentUser.name}</span>
+             {currentUser.employeeCode && (
+               <span className="bg-gold/30 text-white text-[9px] px-1.5 py-0.2 rounded font-mono">
+                 {currentUser.employeeCode}
+               </span>
+             )}
            </span>
+           {currentUser.employeeCardId && (
+             <span className="bg-purple-500/20 text-purple-300 border border-purple-500/30 px-2 py-0.5 rounded-full font-mono text-[10px] flex items-center gap-1" title="معرف كارت الموظف المسجل">
+               <CreditCard className="w-3 h-3" />
+               <span>{currentUser.employeeCardId}</span>
+             </span>
+           )}
            <span className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
              currentUser.role === 'admin' ? 'bg-red-500/20 text-red-400 border border-red-500/30' :
              currentUser.role === 'cashier' ? 'bg-green-500/20 text-green-400 border border-green-500/30' :

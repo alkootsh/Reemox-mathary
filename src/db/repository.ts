@@ -1,12 +1,12 @@
-import { db } from './index.ts';
+import { db, createPool } from './index.ts';
 import { 
   companies, branches, users, memberships, products, categories, units,
   sales, saleItems, payments, inventoryMovements, cashierSessions, 
   customers, suppliers, purchases, purchaseItems, expenses, counters,
   customerTransactions, supplierTransactions, cashierTransactions, expenseCategories,
-  saleReturns, saleReturnItems, purchaseReturns, purchaseReturnItems
+  saleReturns, saleReturnItems, purchaseReturns, purchaseReturnItems, auditLogs
 } from './schema.ts';
-import { eq, and, sql, desc } from 'drizzle-orm';
+import { eq, and, sql, desc, ne } from 'drizzle-orm';
 
 // Helper to sanitize tenant company ID
 function requireTenant(companyId?: string): string {
@@ -14,6 +14,96 @@ function requireTenant(companyId?: string): string {
     return 'company_default';
   }
   return companyId.trim();
+}
+
+// ----------------------------------------------------
+// STARTUP MIGRATIONS
+// ----------------------------------------------------
+export async function runStartupMigrations() {
+  try {
+    const pool = createPool();
+    await pool.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_code text;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_card_id text;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS card_status text DEFAULT 'ACTIVE';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS status text DEFAULT 'ACTIVE';
+      CREATE UNIQUE INDEX IF NOT EXISTS users_employee_card_id_idx ON users(employee_card_id) WHERE employee_card_id IS NOT NULL;
+      
+      ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS branch_id text;
+
+      -- Seed default company & branch if not exists
+      INSERT INTO companies (id, name, tax_number, phone, address, currency, vat_percentage)
+      VALUES ('company_default', 'شركة مارو للتجارة والمحاسبة', '300000000000003', '01000000000', 'الفرع الرئيسي', 'SAR', '15')
+      ON CONFLICT (id) DO NOTHING;
+
+      INSERT INTO branches (id, company_id, name, code, is_main)
+      VALUES ('branch_main', 'company_default', 'الفرع الرئيسي', 'MAIN', true)
+      ON CONFLICT (id) DO NOTHING;
+
+      -- Seed default demo users with card IDs if not exist
+      INSERT INTO users (id, uid, email, name, pin, role, cashier_type, company_id, branch_id, employee_code, employee_card_id, card_status, status)
+      VALUES 
+        ('usr-admin', 'usr-admin', 'admin@maro-pos.local', 'المدير العام', '1234', 'admin', 'retail', 'company_default', 'branch_main', 'EMP-001', 'CARD-ADMIN-999', 'ACTIVE', 'ACTIVE'),
+        ('usr-cashier', 'usr-cashier', 'cashier@maro-pos.local', 'كاشير الفرع', '0000', 'cashier', 'retail', 'company_default', 'branch_main', 'EMP-002', 'CARD-CASHIER-101', 'ACTIVE', 'ACTIVE'),
+        ('usr-acc', 'usr-acc', 'accountant@maro-pos.local', 'المحاسب المالي', '1111', 'accountant', 'retail', 'company_default', 'branch_main', 'EMP-003', 'CARD-ACC-202', 'ACTIVE', 'ACTIVE'),
+        ('usr-inv', 'usr-inv', 'inventory@maro-pos.local', 'أمين المخزن', '2222', 'inventory_manager', 'retail', 'company_default', 'branch_main', 'EMP-004', 'CARD-INV-303', 'ACTIVE', 'ACTIVE')
+      ON CONFLICT (id) DO UPDATE SET
+        employee_code = COALESCE(users.employee_code, EXCLUDED.employee_code),
+        employee_card_id = COALESCE(users.employee_card_id, EXCLUDED.employee_card_id),
+        card_status = COALESCE(users.card_status, EXCLUDED.card_status),
+        status = COALESCE(users.status, EXCLUDED.status);
+
+      INSERT INTO memberships (id, user_id, uid, company_id, branch_id, role, status)
+      VALUES
+        ('mem-admin', 'usr-admin', 'usr-admin', 'company_default', 'branch_main', 'ADMIN', 'ACTIVE'),
+        ('mem-cashier', 'usr-cashier', 'usr-cashier', 'company_default', 'branch_main', 'CASHIER', 'ACTIVE'),
+        ('mem-acc', 'usr-acc', 'usr-acc', 'company_default', 'branch_main', 'ACCOUNTANT', 'ACTIVE'),
+        ('mem-inv', 'usr-inv', 'usr-inv', 'company_default', 'branch_main', 'INVENTORY_MANAGER', 'ACTIVE')
+      ON CONFLICT (id) DO NOTHING;
+    `);
+    console.log('[PostgreSQL Migration] Startup migrations and user cards seed applied successfully');
+  } catch (err) {
+    console.error('[PostgreSQL Migration Error]:', err);
+  }
+}
+
+// ----------------------------------------------------
+// AUDIT LOGGING
+// ----------------------------------------------------
+export async function logAuditEvent(data: {
+  id?: string;
+  companyId: string;
+  userId?: string;
+  branchId?: string;
+  action: string;
+  details?: any;
+}) {
+  try {
+    const id = data.id || `audit_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+    const cId = requireTenant(data.companyId);
+    await db.insert(auditLogs).values({
+      id,
+      companyId: cId,
+      userId: data.userId || null,
+      branchId: data.branchId || null,
+      action: data.action,
+      details: data.details || null,
+    });
+    return id;
+  } catch (err) {
+    console.error('logAuditEvent error:', err);
+    return null;
+  }
+}
+
+export async function getAuditLogs(companyId: string, limitCount = 200) {
+  const cId = requireTenant(companyId);
+  try {
+    return await db.select().from(auditLogs).where(eq(auditLogs.companyId, cId)).orderBy(desc(auditLogs.createdAt)).limit(limitCount);
+  } catch (err) {
+    console.error('getAuditLogs error:', err);
+    return [];
+  }
 }
 
 // ----------------------------------------------------
@@ -102,24 +192,111 @@ export async function getUsers(companyId: string) {
   }
 }
 
-export async function saveUser(data: { id?: string; uid?: string; email: string; name: string; pin?: string; companyId?: string; branchId?: string; role?: string }) {
+export async function getUserById(id: string, companyId?: string) {
+  try {
+    const conditions = companyId ? and(eq(users.id, id), eq(users.companyId, requireTenant(companyId))) : eq(users.id, id);
+    const res = await db.select().from(users).where(conditions).limit(1);
+    return res[0] || null;
+  } catch (err) {
+    console.error('getUserById error:', err);
+    return null;
+  }
+}
+
+export async function getUserByCardId(cardId: string) {
+  if (!cardId || !cardId.trim()) return null;
+  try {
+    const res = await db.select().from(users).where(eq(users.employeeCardId, cardId.trim())).limit(1);
+    return res[0] || null;
+  } catch (err) {
+    console.error('getUserByCardId error:', err);
+    return null;
+  }
+}
+
+export async function saveUser(data: {
+  id?: string;
+  uid?: string;
+  email?: string;
+  name: string;
+  pin?: string;
+  employeeCode?: string;
+  employeeCardId?: string | null;
+  cardStatus?: string;
+  status?: string;
+  companyId?: string;
+  branchId?: string;
+  role?: string;
+  cashierType?: string;
+}) {
   const id = data.id || `usr_${Date.now()}`;
-  const payload = {
+  const cId = requireTenant(data.companyId);
+  const payload: any = {
     id,
     uid: data.uid || id,
-    email: data.email,
+    email: data.email || `${data.name.replace(/\s+/g, '').toLowerCase()}@maro-pos.local`,
     name: data.name,
     pin: data.pin || '1234',
-    companyId: data.companyId || 'company_default',
+    companyId: cId,
     branchId: data.branchId || '',
-    role: data.role || 'cashier'
+    role: data.role || 'cashier',
+    cashierType: data.cashierType || 'retail',
   };
+
+  if (data.employeeCode !== undefined) payload.employeeCode = data.employeeCode;
+  if (data.employeeCardId !== undefined) payload.employeeCardId = data.employeeCardId;
+  if (data.cardStatus !== undefined) payload.cardStatus = data.cardStatus;
+  if (data.status !== undefined) payload.status = data.status;
 
   await db.insert(users).values(payload).onConflictDoUpdate({
     target: users.id,
     set: payload
   });
   return id;
+}
+
+export async function updateUserCard(userId: string, cardData: {
+  employeeCardId?: string | null;
+  cardStatus?: string;
+  employeeCode?: string;
+}, companyId?: string) {
+  const cId = companyId ? requireTenant(companyId) : undefined;
+  
+  // 1. Check if user exists
+  const existingUser = await getUserById(userId, cId);
+  if (!existingUser) {
+    throw new Error('User not found');
+  }
+
+  // 2. If assigning a new non-empty cardId, check uniqueness across other users
+  if (cardData.employeeCardId && cardData.employeeCardId.trim() !== '') {
+    const cleanCard = cardData.employeeCardId.trim();
+    const duplicate = await db.select().from(users).where(and(eq(users.employeeCardId, cleanCard), sql`${users.id} != ${userId}`)).limit(1);
+    if (duplicate.length > 0) {
+      throw new Error(`كارت الموظف (${cleanCard}) مسجل بالفعل للموظف: ${duplicate[0].name}`);
+    }
+  }
+
+  const updateFields: any = {};
+  if (cardData.employeeCardId !== undefined) {
+    updateFields.employeeCardId = cardData.employeeCardId && cardData.employeeCardId.trim() !== '' ? cardData.employeeCardId.trim() : null;
+  }
+  if (cardData.cardStatus !== undefined) {
+    updateFields.cardStatus = cardData.cardStatus;
+  }
+  if (cardData.employeeCode !== undefined) {
+    updateFields.employeeCode = cardData.employeeCode.trim();
+  }
+
+  await db.update(users).set(updateFields).where(eq(users.id, userId));
+  const updated = await getUserById(userId);
+  return updated;
+}
+
+export async function deleteUser(id: string, companyId: string) {
+  const cId = requireTenant(companyId);
+  await db.delete(users).where(and(eq(users.id, id), eq(users.companyId, cId)));
+  await db.delete(memberships).where(and(eq(memberships.userId, id), eq(memberships.companyId, cId)));
 }
 
 export async function getMemberships(companyId: string) {

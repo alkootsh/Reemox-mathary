@@ -32,6 +32,10 @@ export const users = pgTable('users', {
   email: text('email').notNull(),
   name: text('name').notNull(),
   pin: text('pin'),
+  employeeCode: text('employee_code'),
+  employeeCardId: text('employee_card_id').unique(),
+  cardStatus: text('card_status').default('ACTIVE'), // ACTIVE, DISABLED
+  status: text('status').default('ACTIVE'), // ACTIVE, DISABLED, INACTIVE
   companyId: text('company_id'),
   branchId: text('branch_id'),
   role: text('role').default('cashier'),
@@ -75,6 +79,7 @@ export const auditLogs = pgTable('audit_logs', {
   id: text('id').primaryKey(),
   companyId: text('company_id').notNull(),
   userId: text('user_id'),
+  branchId: text('branch_id'),
   action: text('action').notNull(),
   details: jsonb('details'),
   createdAt: timestamp('created_at').defaultNow(),
