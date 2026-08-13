@@ -13,17 +13,19 @@ export const companies = pgTable('companies', {
   currency: text('currency').default('SAR'),
   vatPercentage: numeric('vat_percentage').default('15'),
   enableEmployeeCards: boolean('enable_employee_cards').default(false),
+  isActive: boolean('is_active').default(true),
   createdAt: timestamp('created_at').defaultNow(),
 });
 
 export const branches = pgTable('branches', {
   id: text('id').primaryKey(),
-  companyId: text('company_id').references(() => companies.id).notNull(),
+  companyId: text('company_id').references(() => companies.id, { onDelete: 'cascade' }).notNull(),
   name: text('name').notNull(),
   code: text('code'),
   phone: text('phone'),
   address: text('address'),
   isMain: boolean('is_main').default(false),
+  isIndependentlyManaged: boolean('is_independently_managed').default(false),
   createdAt: timestamp('created_at').defaultNow(),
   isActive: boolean('is_active').default(true),
 });
@@ -144,6 +146,8 @@ export const products = pgTable('products', {
   isWeighted: boolean('is_weighted').default(false),
   createdAt: timestamp('created_at').defaultNow(),
   isActive: boolean('is_active').default(true),
+
+  customAttributes: jsonb('custom_attributes').default({}),
 });
 
 export const productBarcodes = pgTable('product_barcodes', {
@@ -184,6 +188,7 @@ export const sales = pgTable('sales', {
   customerId: text('customer_id'),
   isCredit: boolean('is_credit').default(false),
   offlineSaleId: text('offline_sale_id').unique(),
+  currentStepId: text('current_step_id'),
   createdAt: timestamp('created_at').defaultNow(),
 });
 
@@ -302,6 +307,8 @@ export const customers = pgTable('customers', {
   creditLimit: numeric('credit_limit').default('0'),
   createdAt: timestamp('created_at').defaultNow(),
   isActive: boolean('is_active').default(true),
+
+  customAttributes: jsonb('custom_attributes').default({}),
 });
 
 export const productPrices = pgTable('product_prices', {
@@ -351,6 +358,8 @@ export const suppliers = pgTable('suppliers', {
   balance: numeric('balance').default('0'),
   createdAt: timestamp('created_at').defaultNow(),
   isActive: boolean('is_active').default(true),
+
+  customAttributes: jsonb('custom_attributes').default({}),
 });
 
 export const supplierTransactions = pgTable('supplier_transactions', {
@@ -390,6 +399,7 @@ export const purchases = pgTable('purchases', {
   subtotal: numeric('subtotal').notNull().default('0'),
   vatAmount: numeric('vat_amount').notNull().default('0'),
   total: numeric('total').notNull().default('0'),
+  currentStepId: text('current_step_id'),
   createdAt: timestamp('created_at').defaultNow(),
 });
 
@@ -490,7 +500,7 @@ export const cashierClosures = pgTable('cashier_closures', {
 
 export const accounts = pgTable('accounts', {
   id: text('id').primaryKey(),
-  companyId: text('company_id').references(() => companies.id).notNull(),
+  companyId: text('company_id').references(() => companies.id, { onDelete: 'cascade' }).notNull(),
   code: text('code').notNull(),
   name: text('name').notNull(),
   parentAccountId: text('parent_account_id'),
@@ -503,7 +513,7 @@ export const accounts = pgTable('accounts', {
 
 export const journalEntries = pgTable('journal_entries', {
   id: text('id').primaryKey(),
-  companyId: text('company_id').references(() => companies.id).notNull(),
+  companyId: text('company_id').references(() => companies.id, { onDelete: 'cascade' }).notNull(),
   reference: text('reference').notNull(), // Invoice #, Receipt #, etc.
   date: timestamp('date').defaultNow(),
   description: text('description'),
@@ -524,7 +534,7 @@ export const journalItems = pgTable('journal_items', {
 
 export const costCenters = pgTable('cost_centers', {
   id: text('id').primaryKey(),
-  companyId: text('company_id').references(() => companies.id).notNull(),
+  companyId: text('company_id').references(() => companies.id, { onDelete: 'cascade' }).notNull(),
   name: text('name').notNull(),
   code: text('code'),
   createdAt: timestamp('created_at').defaultNow(),
@@ -536,7 +546,7 @@ export const costCenters = pgTable('cost_centers', {
 
 export const billsOfMaterials = pgTable('bills_of_materials', {
   id: text('id').primaryKey(),
-  companyId: text('company_id').references(() => companies.id).notNull(),
+  companyId: text('company_id').references(() => companies.id, { onDelete: 'cascade' }).notNull(),
   productId: text('product_id').references(() => products.id).notNull(),
   name: text('name').notNull(),
   totalCost: numeric('total_cost').default('0'),
@@ -557,15 +567,18 @@ export const bomItems = pgTable('bom_items', {
 
 export const employees = pgTable('employees', {
   id: text('id').primaryKey(),
-  companyId: text('company_id').references(() => companies.id).notNull(),
+  companyId: text('company_id').references(() => companies.id, { onDelete: 'cascade' }).notNull(),
   name: text('name').notNull(),
   code: text('code').unique(),
   position: text('position'),
   department: text('department'),
   salary: numeric('salary').default('0'),
+  branchId: text('branch_id').references(() => branches.id),
   joiningDate: timestamp('joining_date'),
   status: text('status').default('ACTIVE'), // ACTIVE, TERMINATED, ON_LEAVE
   createdAt: timestamp('created_at').defaultNow(),
+
+  customAttributes: jsonb('custom_attributes').default({}),
 });
 
 export const payroll = pgTable('payroll', {
@@ -620,7 +633,7 @@ export const productBatches = pgTable('product_batches', {
 
 export const aiConfigs = pgTable('ai_configs', {
   id: text('id').primaryKey(),
-  companyId: text('company_id').references(() => companies.id).notNull(),
+  companyId: text('company_id').references(() => companies.id, { onDelete: 'cascade' }).notNull(),
   isEnabled: boolean('is_enabled').default(false),
   licenseKey: text('license_key'),
   updatedAt: timestamp('updated_at').defaultNow(),
@@ -666,13 +679,22 @@ export const branchModuleOverrides = pgTable('branch_module_overrides', {
 export const customFieldDefinitions = pgTable('custom_field_definitions', {
   id: text('id').primaryKey(),
   companyId: text('company_id').references(() => companies.id).notNull(),
-  entityType: text('entity_type').notNull(), // PRODUCT, CUSTOMER, etc.
+  entityType: text('entity_type').notNull(), // PRODUCT, CUSTOMER, SUPPLIER, EMPLOYEE
   fieldKey: text('field_key').notNull(),
   label: text('label').notNull(),
-  dataType: text('data_type').notNull(), // TEXT, NUMBER, BOOLEAN, SELECT
+  dataType: text('data_type').notNull(), // TEXT, NUMBER, DATE, BOOLEAN, SELECT, MULTI_SELECT
   isRequired: boolean('is_required').default(false),
-  optionsJson: jsonb('options_json').default([]), // For SELECT fields
+  optionsJson: jsonb('options_json').default([]), // For SELECT / MULTI_SELECT fields
   createdAt: timestamp('created_at').defaultNow()
+});
+
+export const columnConfigurations = pgTable('column_configurations', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id').references(() => companies.id).notNull(),
+  userId: text('user_id'),
+  entityType: text('entity_type').notNull(), // PRODUCT, CUSTOMER, SUPPLIER, EMPLOYEE
+  columnsJson: jsonb('columns_json').default([]),
+  updatedAt: timestamp('updated_at').defaultNow()
 });
 
 export const counters = pgTable('counters', {
@@ -680,4 +702,101 @@ export const counters = pgTable('counters', {
   companyId: text('company_id').notNull(),
   name: text('name').notNull(),
   currentValue: integer('current_value').default(0),
+});
+
+export const workflowDefinitions = pgTable('workflow_definitions', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id').references(() => companies.id, { onDelete: 'cascade' }).notNull(),
+  name: text('name').notNull(),
+  documentType: text('document_type').notNull(), // SALES_ORDER, PURCHASE_ORDER, SALES_INVOICE
+  description: text('description'),
+  isActive: boolean('is_active').default(true).notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const workflowSteps = pgTable('workflow_steps', {
+  id: text('id').primaryKey(),
+  workflowDefinitionId: text('workflow_definition_id').references(() => workflowDefinitions.id, { onDelete: 'cascade' }).notNull(),
+  name: text('name').notNull(),
+  status: text('status').notNull(), // e.g. DRAFT, PENDING_APPROVAL, APPROVED, REJECTED, POSTED
+  isInitial: boolean('is_initial').default(false).notNull(),
+  isFinal: boolean('is_final').default(false).notNull(),
+  stepOrder: integer('step_order').default(0).notNull(),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const workflowTransitions = pgTable('workflow_transitions', {
+  id: text('id').primaryKey(),
+  workflowDefinitionId: text('workflow_definition_id').references(() => workflowDefinitions.id, { onDelete: 'cascade' }).notNull(),
+  fromStepId: text('from_step_id').references(() => workflowSteps.id, { onDelete: 'cascade' }).notNull(),
+  toStepId: text('to_step_id').references(() => workflowSteps.id, { onDelete: 'cascade' }).notNull(),
+  name: text('name').notNull(),
+  requiredRole: text('required_role'), // e.g. "ADMIN", "MANAGER", etc.
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const workflowHistory = pgTable('workflow_history', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id').references(() => companies.id).notNull(),
+  documentId: text('document_id').notNull(),
+  documentType: text('document_type').notNull(), // e.g. SALES_ORDER, PURCHASE_ORDER, SALES_INVOICE
+  fromStepId: text('from_step_id').references(() => workflowSteps.id),
+  toStepId: text('to_step_id').references(() => workflowSteps.id).notNull(),
+  performedBy: text('performed_by').references(() => users.id),
+  notes: text('notes'),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+// --- Domain Specific Schemas ---
+
+export const queues = pgTable('queues', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  type: text('type').notNull(), // 'salon', 'gym', 'clinic'
+  branchId: text('branch_id').references(() => branches.id),
+  companyId: text('company_id'),
+  currentQueueNumber: integer('current_queue_number').default(0),
+});
+
+export const queueTickets = pgTable('queue_tickets', {
+  id: text('id').primaryKey(),
+  queueId: text('queue_id').references(() => queues.id),
+  customerId: text('customer_id'),
+  customerName: text('customer_name'),
+  ticketNumber: integer('ticket_number'),
+  status: text('status').default('WAITING'), // WAITING, SERVING, COMPLETED, CANCELLED
+  expectedWaitTimeMinutes: integer('expected_wait_time_minutes'),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const jobCards = pgTable('job_cards', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id'),
+  branchId: text('branch_id').references(() => branches.id),
+  customerId: text('customer_id'),
+  vehicleDetails: jsonb('vehicle_details'), // { make, model, year, plateNumber, vin }
+  description: text('description'),
+  status: text('status').default('PENDING'), // PENDING, IN_PROGRESS, COMPLETED
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const businessServices = pgTable('business_services', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id'),
+  branchId: text('branch_id').references(() => branches.id),
+  name: text('name').notNull(),
+  type: text('type').notNull(), // 'service', 'course', 'appointment'
+  price: numeric('price').default('0'),
+  durationMinutes: integer('duration_minutes'),
+  createdAt: timestamp('created_at').defaultNow(),
+});
+
+export const restaurantTables = pgTable('restaurant_tables', {
+  id: text('id').primaryKey(),
+  companyId: text('company_id'),
+  branchId: text('branch_id').references(() => branches.id),
+  name: text('name').notNull(), // Table 1, Table 2, etc.
+  capacity: integer('capacity').default(4),
+  status: text('status').default('AVAILABLE'), // AVAILABLE, OCCUPIED, RESERVED
+  currentOrderId: text('current_order_id'),
 });

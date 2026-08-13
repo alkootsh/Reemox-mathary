@@ -10,13 +10,14 @@ import twilio from "twilio";
 import "dotenv/config";
 
 // SQL Repository Helpers
+import { analyzeWithAI, forecastDemand, analyzeSuppliers } from "./src/lib/ai.ts";
 import {
     getCompanies, getCompanyById, saveCompany,
     getBranches, saveBranch,
     getUsers, saveUser, getUserById, getUserByCardId, updateUserCard, deleteUser,
     getMemberships, saveMembership,
     getCategories, saveCategory, deleteCategory,
-    getProducts, saveProduct, deleteProduct, getProductById,
+    getProducts, saveProduct, deleteProduct, getProductById, getProductsBelowReorderPoint, generateSmartPurchaseOrder,
     getSales, createSaleTransaction, deleteSaleTransaction,
     getInventoryMovements,
     getPurchases, createPurchaseTransaction, deletePurchaseTransaction,
@@ -36,11 +37,18 @@ import {
     getAiConfig, updateAiConfig, getUserAiMemory, updateUserAiMemory, logSystemTelemetry, getSystemTelemetry,
     getCompanyModuleOverrides, setCompanyModuleOverride,
     getBranchModuleOverrides, setBranchModuleOverride,
-    getCustomFieldDefinitions, createCustomFieldDefinition
+    getCustomFieldDefinitions, createCustomFieldDefinition, deleteCustomFieldDefinition,
+    getColumnConfiguration, saveColumnConfiguration, getDynamicReport,
+    getWorkflowDefinitions, getWorkflowDefinitionWithDetails, createWorkflowDefinition, deleteWorkflowDefinition, getDocumentWorkflowState, executeWorkflowTransition,
+    deleteCompany,
+    getQueues, saveQueue, getQueueTickets, saveQueueTicket, updateQueueTicketStatus,
+    getJobCards, saveJobCard,
+    getBusinessServices, saveBusinessService,
+    getRestaurantTables, saveRestaurantTable
 } from "./src/db/repository.ts";
 import { runMigration } from "./scripts/migrateFirestoreToPostgres.ts";
 import { db } from "./src/db/index.ts";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -197,8 +205,8 @@ function verifyCardSessionToken(token: string): { userId: string; uid: string; e
 }
 
 async function startServer() {
-    // Run PostgreSQL Schema Migrations
-    await runStartupMigrations();
+    // Run PostgreSQL Schema Migrations asynchronously
+    runStartupMigrations().catch(err => console.warn('[Startup Migration Notice]:', err));
 
     const app = express();
     const PORT = 3000;
@@ -398,7 +406,7 @@ async function startServer() {
         // Server-Side Tenant Context Resolution
         let companyId = cardSessionPayload?.companyId || (req.query.companyId as string) || (req.body && req.body.companyId) || "company_default";
         let branchId = cardSessionPayload?.branchId || "branch_main";
-        let role = cardSessionPayload?.role || "ADMIN";
+        let role = (req.headers['x-user-role'] as string) || cardSessionPayload?.role || "ADMIN";
 
         try {
             const userRecords = await db.select().from(users).where(eq(users.uid, uid)).limit(1);
@@ -449,14 +457,14 @@ async function startServer() {
                 }
                 companyId = m.companyId || companyId;
                 branchId = m.branchId || branchId;
-                role = m.role || role;
+                role = (req.headers['x-user-role'] as string) || m.role || role;
             }
         } catch (err) {
             console.error(`[Database Error] Tenant context lookup failed for UID ${uid}:`, err);
         }
 
-        // If query or body specified companyId and user is ADMIN, honor it
-        const requestedCompany = (req.query.companyId as string) || (req.body && typeof req.body === 'object' && req.body.companyId);
+        // If query, body, or header specified companyId and user is ADMIN, honor it
+        const requestedCompany = (req.query.companyId as string) || (req.body && typeof req.body === 'object' && req.body.companyId) || (req.headers['x-company-id'] as string);
         if (requestedCompany && (role.toUpperCase() === "ADMIN" || companyId === "company_default")) {
             companyId = requestedCompany;
         }
@@ -748,6 +756,17 @@ async function startServer() {
 
     const runtimeConfigCache = new Map<string, any>();
 
+    // Industry definitions (Phase 3)
+    const INDUSTRY_DEFAULTS: Record<string, string[]> = {
+        'RETAIL': ['POS', 'SALES', 'INVENTORY', 'ACCOUNTING'],
+        'FOOD': ['POS', 'SALES', 'INVENTORY', 'ACCOUNTING', 'BATCHES'],
+        'CLOTHING': ['POS', 'SALES', 'INVENTORY', 'ACCOUNTING', 'VARIANTS'],
+        'RESTAURANT': ['POS', 'SALES', 'INVENTORY', 'ACCOUNTING', 'RESTAURANT_MODE'],
+        'AUTOMOTIVE': ['SALES', 'INVENTORY', 'ACCOUNTING', 'SERIAL_NUMBERS', 'MAINTENANCE'],
+        'CLINIC': ['SALES', 'INVENTORY', 'ACCOUNTING', 'CLINIC_MODE', 'BOOKINGS'],
+        'CONTRACTING': ['SALES', 'INVENTORY', 'ACCOUNTING', 'PROJECTS', 'PURCHASES']
+    };
+
     async function getRuntimeConfig(companyId: string, branchId: string) {
         const cacheKey = `${companyId}_${branchId}`;
         if (runtimeConfigCache.has(cacheKey)) {
@@ -758,16 +777,44 @@ async function startServer() {
         const bOverrides = await getBranchModuleOverrides(branchId);
 
         const enabledModules = new Set<string>();
-        // System defaults
-        enabledModules.add('POS');
+        // System defaults (Core ERP Modules)
+        enabledModules.add('ACCOUNTING');
         enabledModules.add('SALES');
+        enabledModules.add('PURCHASES');
         enabledModules.add('INVENTORY');
+        enabledModules.add('HR');
+        enabledModules.add('POS');
 
+        // Extract industries from company overrides
+        const selectedIndustries = new Set<string>();
         for (const mo of cOverrides) {
-            if (mo.isEnabled) enabledModules.add(mo.moduleName);
-            else enabledModules.delete(mo.moduleName);
+            if (mo.isEnabled && mo.moduleName.startsWith('INDUSTRY:')) {
+                selectedIndustries.add(mo.moduleName.split(':')[1]);
+            }
         }
 
+        // Fallback default: RETAIL industry if no explicit industry override is set
+        if (selectedIndustries.size === 0) {
+            selectedIndustries.add('RETAIL');
+        }
+
+        // Apply Industry defaults
+        for (const industry of selectedIndustries) {
+            const mods = INDUSTRY_DEFAULTS[industry] || [];
+            for (const mod of mods) {
+                enabledModules.add(mod);
+            }
+        }
+
+        // Apply Company overrides (modules only)
+        for (const mo of cOverrides) {
+            if (!mo.moduleName.startsWith('INDUSTRY:')) {
+                if (mo.isEnabled) enabledModules.add(mo.moduleName);
+                else enabledModules.delete(mo.moduleName);
+            }
+        }
+
+        // Apply Branch overrides
         for (const mo of bOverrides) {
             if (mo.isEnabled) enabledModules.add(mo.moduleName);
             else enabledModules.delete(mo.moduleName);
@@ -777,6 +824,7 @@ async function startServer() {
 
         const config = {
             enabledModules: Array.from(enabledModules),
+            selectedIndustries: Array.from(selectedIndustries),
             customFields,
             timestamp: Date.now()
         };
@@ -797,6 +845,29 @@ async function startServer() {
             next();
         };
     }
+
+    // Apply Module Protections
+    app.use("/api/sales", requireModule("SALES"));
+    app.use("/api/sale-returns", requireModule("SALES"));
+    
+    app.use("/api/purchases", requireModule("PURCHASES"));
+    app.use("/api/purchase-returns", requireModule("PURCHASES"));
+    app.use("/api/suppliers", requireModule("PURCHASES"));
+    
+    app.use("/api/products", requireModule("INVENTORY"));
+    app.use("/api/categories", requireModule("INVENTORY"));
+    app.use("/api/inventory-movements", requireModule("INVENTORY"));
+    
+    app.use("/api/accounts", requireModule("ACCOUNTING"));
+    app.use("/api/expenses", requireModule("ACCOUNTING"));
+    app.use("/api/expense-categories", requireModule("ACCOUNTING"));
+    app.use("/api/reports/financial-summary", requireModule("ACCOUNTING"));
+    
+    app.use("/api/manufacturing", requireModule("MANUFACTURING"));
+    app.use("/api/hr", requireModule("HR"));
+    app.use("/api/payroll", requireModule("HR"));
+    app.use("/api/employees", requireModule("HR"));
+    app.use("/api/crm", requireModule("CRM"));
 
     app.get("/api/config/runtime", async (req, res) => {
         try {
@@ -833,6 +904,144 @@ async function startServer() {
         }
     });
 
+    // ====================================================
+    // WORKFLOW ENGINE ROUTES (PHASE 5)
+    // ====================================================
+    app.get("/api/workflows", async (req, res) => {
+        try {
+            const ctx = (req as any).userContext;
+            if (!ctx) return res.status(401).json({ error: 'Unauthorized' });
+            
+            const { documentType } = req.query;
+            const workflows = await getWorkflowDefinitions(ctx.companyId, documentType as string);
+            res.json({ success: true, data: workflows });
+        } catch (err: any) {
+            res.status(500).json({ success: false, error: err?.message });
+        }
+    });
+
+    app.get("/api/workflows/:id", async (req, res) => {
+        try {
+            const ctx = (req as any).userContext;
+            if (!ctx) return res.status(401).json({ error: 'Unauthorized' });
+            
+            const workflow = await getWorkflowDefinitionWithDetails(ctx.companyId, req.params.id);
+            if (!workflow) return res.status(404).json({ success: false, error: 'Workflow not found' });
+            
+            res.json({ success: true, data: workflow });
+        } catch (err: any) {
+            res.status(500).json({ success: false, error: err?.message });
+        }
+    });
+
+    app.post("/api/workflows", async (req, res) => {
+        try {
+            const ctx = (req as any).userContext;
+            if (!ctx) return res.status(401).json({ error: 'Unauthorized' });
+            if (ctx.role !== 'ADMIN') {
+                return res.status(403).json({ error: 'Forbidden: Only Admins can define workflows' });
+            }
+            
+            const { name, documentType, description, steps, transitions } = req.body;
+            if (!name || !documentType || !steps || !transitions) {
+                return res.status(400).json({ success: false, error: 'Missing required fields' });
+            }
+            
+            const workflowId = await createWorkflowDefinition(ctx.companyId, {
+                name,
+                documentType,
+                description,
+                steps,
+                transitions
+            });
+            
+            res.json({ success: true, data: { id: workflowId } });
+        } catch (err: any) {
+            res.status(400).json({ success: false, error: err?.message });
+        }
+    });
+
+    app.delete("/api/workflows/:id", async (req, res) => {
+        try {
+            const ctx = (req as any).userContext;
+            if (!ctx) return res.status(401).json({ error: 'Unauthorized' });
+            if (ctx.role !== 'ADMIN') {
+                return res.status(403).json({ error: 'Forbidden: Only Admins can delete workflows' });
+            }
+            
+            await deleteWorkflowDefinition(ctx.companyId, req.params.id);
+            res.json({ success: true });
+        } catch (err: any) {
+            res.status(400).json({ success: false, error: err?.message });
+        }
+    });
+
+    app.get("/api/workflows/document/:type/:id", async (req, res) => {
+        try {
+            const ctx = (req as any).userContext;
+            if (!ctx) return res.status(401).json({ error: 'Unauthorized' });
+            
+            const { type, id } = req.params;
+            
+            // Module Enablement Check
+            const config = await getRuntimeConfig(ctx.companyId, ctx.branchId);
+            console.log(`[DEBUG WORKFLOW STATE] companyId: ${ctx.companyId}, branchId: ${ctx.branchId}, isSalesEnabled: ${config.enabledModules.includes("SALES")}, enabledModules:`, config.enabledModules);
+            const isSalesEnabled = config.enabledModules.includes("SALES");
+            const isPurchasesEnabled = config.enabledModules.includes("PURCHASES");
+            if ((type === 'SALES_ORDER' || type === 'SALES_INVOICE') && !isSalesEnabled) {
+                return res.status(403).json({ error: 'Module SALES is disabled' });
+            }
+            if (type === 'PURCHASE_ORDER' && !isPurchasesEnabled) {
+                return res.status(403).json({ error: 'Module PURCHASES is disabled' });
+            }
+            
+            const state = await getDocumentWorkflowState(ctx.companyId, id, type);
+            if (!state) return res.status(404).json({ success: false, error: 'Workflow state not found for this document' });
+            
+            res.json({ success: true, data: state });
+        } catch (err: any) {
+            res.status(500).json({ success: false, error: err?.message });
+        }
+    });
+
+    app.post("/api/workflows/document/:type/:id/transition", async (req, res) => {
+        try {
+            const ctx = (req as any).userContext;
+            if (!ctx) return res.status(401).json({ error: 'Unauthorized' });
+            
+            const { type, id } = req.params;
+            const { transitionId, notes } = req.body;
+            
+            if (!transitionId) {
+                return res.status(400).json({ success: false, error: 'Missing transitionId' });
+            }
+            
+            // Module Enablement Check
+            const config = await getRuntimeConfig(ctx.companyId, ctx.branchId);
+            const isSalesEnabled = config.enabledModules.includes("SALES");
+            const isPurchasesEnabled = config.enabledModules.includes("PURCHASES");
+            if ((type === 'SALES_ORDER' || type === 'SALES_INVOICE') && !isSalesEnabled) {
+                return res.status(403).json({ error: 'Module SALES is disabled' });
+            }
+            if (type === 'PURCHASE_ORDER' && !isPurchasesEnabled) {
+                return res.status(403).json({ error: 'Module PURCHASES is disabled' });
+            }
+            
+            const targetStep = await executeWorkflowTransition(ctx.companyId, {
+                documentId: id,
+                documentType: type,
+                transitionId,
+                performedBy: ctx.uid,
+                userRole: ctx.role,
+                notes
+            });
+            
+            res.json({ success: true, data: targetStep });
+        } catch (err: any) {
+            res.status(400).json({ success: false, error: err?.message });
+        }
+    });
+
     // 2. Companies & Branches
     app.get("/api/companies", async (req, res) => {
         const list = await getCompanies();
@@ -849,6 +1058,15 @@ async function startServer() {
         res.json({ success: true, id });
     });
 
+    app.delete("/api/companies/:id", async (req, res) => {
+        try {
+            await deleteCompany(req.params.id);
+            res.json({ success: true });
+        } catch (err: any) {
+            res.status(500).json({ success: false, error: err.message });
+        }
+    });
+
     app.get("/api/branches", async (req, res) => {
         const companyId = (req.query.companyId as string) || 'company_default';
         const list = await getBranches(companyId);
@@ -857,6 +1075,71 @@ async function startServer() {
 
     app.post("/api/branches", async (req, res) => {
         const id = await saveBranch(req.body);
+        res.json({ success: true, id });
+    });
+
+    // Business Activities: Queues, Workshops, Services
+    app.get("/api/queues", async (req, res) => {
+        const companyId = req.query.companyId as string;
+        const branchId = req.query.branchId as string;
+        const list = await getQueues(companyId, branchId);
+        res.json(list);
+    });
+
+    app.post("/api/queues", async (req, res) => {
+        const id = await saveQueue(req.body);
+        res.json({ success: true, id });
+    });
+
+    app.get("/api/queue-tickets", async (req, res) => {
+        const queueId = req.query.queueId as string;
+        const list = await getQueueTickets(queueId);
+        res.json(list);
+    });
+
+    app.post("/api/queue-tickets", async (req, res) => {
+        const id = await saveQueueTicket(req.body);
+        res.json({ success: true, id });
+    });
+
+    app.patch("/api/queue-tickets/:id/status", async (req, res) => {
+        await updateQueueTicketStatus(req.params.id, req.body.status);
+        res.json({ success: true });
+    });
+
+    app.get("/api/job-cards", async (req, res) => {
+        const companyId = req.query.companyId as string;
+        const branchId = req.query.branchId as string;
+        const list = await getJobCards(companyId, branchId);
+        res.json(list);
+    });
+
+    app.post("/api/job-cards", async (req, res) => {
+        const id = await saveJobCard(req.body);
+        res.json({ success: true, id });
+    });
+
+    app.get("/api/business-services", async (req, res) => {
+        const companyId = req.query.companyId as string;
+        const branchId = req.query.branchId as string;
+        const list = await getBusinessServices(companyId, branchId);
+        res.json(list);
+    });
+
+    app.post("/api/business-services", async (req, res) => {
+        const id = await saveBusinessService(req.body);
+        res.json({ success: true, id });
+    });
+
+    app.get("/api/restaurant-tables", async (req, res) => {
+        const companyId = req.query.companyId as string;
+        const branchId = req.query.branchId as string;
+        const list = await getRestaurantTables(companyId, branchId);
+        res.json(list);
+    });
+
+    app.post("/api/restaurant-tables", async (req, res) => {
+        const id = await saveRestaurantTable(req.body);
         res.json({ success: true, id });
     });
 
@@ -998,6 +1281,134 @@ async function startServer() {
     });
 
     // 4. Categories & Products
+    
+    // Custom Field Definitions (Hybrid JSONB Custom Fields Engine)
+    app.get("/api/custom-field-definitions", async (req, res) => {
+        try {
+            const companyId = (req as any).userContext?.companyId || (req.query.companyId as string) || 'company_default';
+            const entityType = req.query.entityType as string;
+            const defs = await getCustomFieldDefinitions(companyId, entityType);
+            res.json(defs);
+        } catch (err: any) {
+            res.status(500).json({ error: err?.message || "Failed to fetch custom field definitions" });
+        }
+    });
+
+    app.post("/api/custom-field-definitions", async (req, res) => {
+        try {
+            const companyId = (req as any).userContext?.companyId || req.body.companyId || 'company_default';
+            const role = (req as any).userContext?.role || 'ADMIN';
+            if (role !== 'ADMIN' && role !== 'MANAGER') {
+                return res.status(403).json({ error: "Forbidden: Admin or Manager access required" });
+            }
+            const id = await createCustomFieldDefinition(companyId, req.body);
+            res.json({ success: true, id });
+        } catch (err: any) {
+            res.status(400).json({ error: err?.message || "Failed to create custom field definition" });
+        }
+    });
+
+    app.delete("/api/custom-field-definitions/:id", async (req, res) => {
+        try {
+            const companyId = (req as any).userContext?.companyId || (req.query.companyId as string) || 'company_default';
+            const role = (req as any).userContext?.role || 'ADMIN';
+            if (role !== 'ADMIN' && role !== 'MANAGER') {
+                return res.status(403).json({ error: "Forbidden: Admin or Manager access required" });
+            }
+            await deleteCustomFieldDefinition(req.params.id, companyId);
+            res.json({ success: true });
+        } catch (err: any) {
+            res.status(500).json({ error: err?.message || "Failed to delete custom field definition" });
+        }
+    });
+
+    // Dynamic Reporting & Column Manager API Endpoints (Phase 4.5)
+    app.get("/api/reports/dynamic/config/:entityType", async (req, res) => {
+        try {
+            const companyId = (req as any).userContext?.companyId || (req.query.companyId as string) || 'company_default';
+            const userId = (req as any).userContext?.userId || (req.query.userId as string) || undefined;
+            const result = await getColumnConfiguration(companyId, req.params.entityType, userId);
+            res.json({ success: true, ...result });
+        } catch (err: any) {
+            res.status(500).json({ error: err?.message || "Failed to fetch column configuration" });
+        }
+    });
+
+    app.post("/api/reports/dynamic/config/:entityType", async (req, res) => {
+        try {
+            const companyId = (req as any).userContext?.companyId || req.body?.companyId || 'company_default';
+            const role = (req as any).userContext?.role || 'ADMIN';
+            if (role !== 'ADMIN' && role !== 'MANAGER') {
+                return res.status(403).json({ error: "Forbidden: Admin or Manager access required" });
+            }
+            const userId = (req as any).userContext?.userId || req.body?.userId || null;
+            const columns = req.body?.columns || [];
+            const id = await saveColumnConfiguration(companyId, req.params.entityType, userId, columns);
+            res.json({ success: true, id });
+        } catch (err: any) {
+            res.status(400).json({ error: err?.message || "Failed to save column configuration" });
+        }
+    });
+
+    app.get("/api/reports/dynamic/:entityType", async (req, res) => {
+        try {
+            const companyId = (req as any).userContext?.companyId || (req.query.companyId as string) || 'company_default';
+            const userId = (req as any).userContext?.userId || (req.query.userId as string) || undefined;
+            let filters: any = {};
+            if (req.query.filters) {
+                try {
+                    filters = typeof req.query.filters === 'string' ? JSON.parse(req.query.filters) : req.query.filters;
+                } catch (e) {
+                    filters = {};
+                }
+            }
+            const search = (req.query.search as string) || "";
+            const sortBy = (req.query.sortBy as string) || "";
+            const sortOrder = (req.query.sortOrder as string) || "asc";
+            const page = parseInt((req.query.page as string) || "1", 10);
+            const limit = parseInt((req.query.limit as string) || "100", 10);
+
+            const result = await getDynamicReport(companyId, req.params.entityType, {
+                filters,
+                search,
+                sortBy,
+                sortOrder,
+                page,
+                limit,
+                userId
+            });
+            res.json(result);
+        } catch (err: any) {
+            res.status(500).json({ error: err?.message || "Failed to generate dynamic report" });
+        }
+    });
+
+    app.post("/api/reports/dynamic/:entityType/query", async (req, res) => {
+        try {
+            const companyId = (req as any).userContext?.companyId || req.body?.companyId || 'company_default';
+            const userId = (req as any).userContext?.userId || req.body?.userId || undefined;
+            const filters = req.body?.filters || {};
+            const search = req.body?.search || "";
+            const sortBy = req.body?.sortBy || "";
+            const sortOrder = req.body?.sortOrder || "asc";
+            const page = parseInt(req.body?.page || "1", 10);
+            const limit = parseInt(req.body?.limit || "100", 10);
+
+            const result = await getDynamicReport(companyId, req.params.entityType, {
+                filters,
+                search,
+                sortBy,
+                sortOrder,
+                page,
+                limit,
+                userId
+            });
+            res.json(result);
+        } catch (err: any) {
+            res.status(500).json({ error: err?.message || "Failed to query dynamic report" });
+        }
+    });
+
     app.get("/api/categories", async (req, res) => {
         const companyId = (req.query.companyId as string) || 'company_default';
         const list = await getCategories(companyId);
@@ -1042,6 +1453,48 @@ async function startServer() {
         }
     });
 
+    // Procurement Smart Suggestions
+    app.get("/api/procurement/suggestions", async (req, res) => {
+      try {
+        const companyId = (req as any).userContext?.companyId || req.query.companyId || 'company_default';
+        const suggestions = await getProductsBelowReorderPoint(companyId);
+        res.json({ success: true, data: suggestions });
+      } catch (err: any) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    app.post("/api/procurement/smart-order", async (req, res) => {
+      try {
+        const companyId = (req as any).userContext?.companyId || req.body.companyId || 'company_default';
+        const userId = (req as any).userContext?.uid || 'system';
+        const result = await generateSmartPurchaseOrder(companyId, userId);
+        res.json(result);
+      } catch (err: any) {
+        res.status(500).json({ success: false, error: err.message });
+      }
+    });
+
+    app.post("/api/ai/analyze", async (req, res) => {
+        try {
+            const { prompt } = req.body;
+            const result = await analyzeWithAI(prompt);
+            res.json({ success: true, data: result });
+        } catch (err: any) {
+            res.status(500).json({ success: false, error: err.message });
+        }
+    });
+
+    app.post("/api/ai/forecast", async (req, res) => {
+        try {
+            const { productName, recentSales } = req.body;
+            const result = await forecastDemand(productName, recentSales);
+            res.json({ success: true, data: result });
+        } catch (err: any) {
+            res.status(500).json({ success: false, error: err.message });
+        }
+    });
+
     app.get("/api/products", async (req, res) => {
         const companyId = (req.query.companyId as string) || 'company_default';
         const list = await getProducts(companyId);
@@ -1061,8 +1514,13 @@ async function startServer() {
     });
 
     app.post("/api/products", async (req, res) => {
-        const id = await saveProduct(req.body);
-        res.json({ success: true, id });
+        try {
+            const companyId = (req as any).userContext?.companyId || req.body.companyId || 'company_default';
+            const id = await saveProduct({ ...req.body, companyId });
+            res.json({ success: true, id });
+        } catch (err: any) {
+            res.status(400).json({ success: false, error: err?.message || "Failed to save product" });
+        }
     });
 
     app.delete("/api/products/:id", async (req, res) => {
@@ -1183,7 +1641,7 @@ async function startServer() {
             const empId = await createEmployee(companyId, req.body);
             res.json({ success: true, id: empId });
         } catch (err: any) {
-            res.status(500).json({ error: err.message });
+            res.status(400).json({ success: false, error: err.message });
         }
     });
 
@@ -1226,7 +1684,10 @@ async function startServer() {
     });
 
     // --- AI CO-PILOT MODULE ---
-    const genAI = process.env.GEMINI_API_KEY ? new GoogleGenerativeAI(process.env.GEMINI_API_KEY) : null;
+    const genAI = process.env.GEMINI_API_KEY ? new GoogleGenAI({ 
+        apiKey: process.env.GEMINI_API_KEY,
+        httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+    }) : null;
 
     app.get("/api/ai/config", async (req, res) => {
         try {
@@ -1270,11 +1731,10 @@ async function startServer() {
     app.post("/api/ai/chat", async (req, res) => {
         try {
             if (!genAI) {
-                return res.status(500).json({ error: "Gemini API key not configured" });
+                return res.status(503).json({ text: "عذراً، محرك الذكاء الاصطناعي غير مهيأ حالياً. يرجى تزويد GEMINI_API_KEY في إعدادات النظام." });
             }
 
             const { message, userContext, screenContext, history } = req.body;
-            const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
 
             // 1. Fetch System Telemetry for diagnostics
             const telemetry = await getSystemTelemetry(10);
@@ -1306,18 +1766,15 @@ async function startServer() {
                 6. Respond in the same language as the user (Arabic preferred for this system).
             `;
 
-            const chat = model.startChat({
-                history: history || [],
-                generationConfig: { maxOutputTokens: 1000 },
-            });
-
-            // Prepend system context to the first message if needed or use systemInstruction in newer SDKs
-            // For simplicity with this SDK version, we'll include it in the prompt if history is empty
+            // Prepend system context to the first message if needed
             const fullPrompt = history && history.length > 0 ? message : `${systemPrompt}\n\nUser Message: ${message}`;
             
-            const result = await chat.sendMessage(fullPrompt);
-            const response = await result.response;
-            res.json({ text: response.text() });
+            const result = await genAI.models.generateContent({
+                model: "gemini-3.7-flash",
+                contents: message,
+            });
+
+            res.json({ text: result.text });
         } catch (err: any) {
             console.error("AI Chat Error:", err);
             res.status(500).json({ error: err.message });
@@ -1585,7 +2042,7 @@ async function startServer() {
             res.json({ success: true, id });
         } catch (err: any) {
             console.error('Save Customer Error:', err);
-            res.status(500).json({ success: false, error: err?.message || 'Failed to save customer' });
+            res.status(400).json({ success: false, error: err?.message || 'Failed to save customer' });
         }
     });
 
@@ -1627,7 +2084,7 @@ async function startServer() {
             res.json({ success: true, id });
         } catch (err: any) {
             console.error('Save Supplier Error:', err);
-            res.status(500).json({ success: false, error: err?.message || 'Failed to save supplier' });
+            res.status(400).json({ success: false, error: err?.message || 'Failed to save supplier' });
         }
     });
 

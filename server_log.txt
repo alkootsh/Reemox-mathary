@@ -1,50 +1,27 @@
-
-> react-example@0.0.0 dev
-> tsx server.ts
-
-[2026-08-12T05:31:57.509Z]  @firebase/firestore: Firestore (12.13.0): enableIndexedDbPersistence() will be deprecated in the future, you can use `FirestoreSettings.cache` instead.
+[2026-08-12T13:51:59.367Z]  @firebase/firestore: Firestore (12.13.0): enableIndexedDbPersistence() will be deprecated in the future, you can use `FirestoreSettings.cache` instead.
+◇ injected env (0) from .env // tip: ⌁ auth for agents [www.vestauth.com]
 [Migration Warning] Statement skipped: ALTER TABLE users ADD COLUMN IF NOT EXISTS employe... - Error: must be owner of table users
 [Migration Warning] Statement skipped: ALTER TABLE users ADD COLUMN IF NOT EXISTS employe... - Error: must be owner of table users
 [Migration Warning] Statement skipped: ALTER TABLE users ADD COLUMN IF NOT EXISTS card_st... - Error: must be owner of table users
 [Migration Warning] Statement skipped: ALTER TABLE users ADD COLUMN IF NOT EXISTS status ... - Error: must be owner of table users
 [Migration Warning] Statement skipped: CREATE UNIQUE INDEX IF NOT EXISTS users_employee_c... - Error: must be owner of table users
 [Migration Warning] Statement skipped: ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS br... - Error: must be owner of table audit_logs
-[PostgreSQL Migration Error]: error: duplicate key value violates unique constraint "users_employee_card_id_idx"
-    at /app/applet/node_modules/pg-pool/index.js:45:11
-    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
-    at async runStartupMigrations (/app/applet/src/db/repository.ts:50:5)
-    at async startServer (/app/applet/server.ts:190:5) {
-  length: 239,
-  severity: 'ERROR',
-  code: '23505',
-  detail: 'Key (employee_card_id)=(CARD-ADMIN-999) already exists.',
-  hint: undefined,
-  position: undefined,
-  internalPosition: undefined,
-  internalQuery: undefined,
-  where: undefined,
-  schema: 'public',
-  table: 'users',
-  column: undefined,
-  dataType: undefined,
-  constraint: 'users_employee_card_id_idx',
-  file: 'nbtinsert.c',
-  line: '673',
-  routine: '_bt_check_unique'
-}
+[Migration Warning] Statement skipped: ALTER TABLE products ADD COLUMN IF NOT EXISTS cust... - Error: must be owner of table products
+[Migration Warning] Statement skipped: ALTER TABLE customers ADD COLUMN IF NOT EXISTS cus... - Error: must be owner of table customers
+[Migration Warning] Statement skipped: ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS cus... - Error: must be owner of table suppliers
+[Migration Warning] Statement skipped: ALTER TABLE employees ADD COLUMN IF NOT EXISTS cus... - Error: must be owner of table employees
+[Migration Warning] Statement skipped: ALTER TABLE custom_field_definitions ADD COLUMN IF... - Error: must be owner of table custom_field_definitions
+[Migration Warning] Statement skipped: ALTER TABLE custom_field_definitions ADD COLUMN IF... - Error: must be owner of table custom_field_definitions
+[Migration Warning] Statement skipped: ALTER TABLE custom_field_definitions ADD COLUMN IF... - Error: must be owner of table custom_field_definitions
+[Migration Warning] Statement skipped: ALTER TABLE custom_field_definitions ADD COLUMN IF... - Error: must be owner of table custom_field_definitions
+[Migration Warning] Statement skipped: ALTER TABLE custom_field_definitions ADD COLUMN IF... - Error: must be owner of table custom_field_definitions
+[Migration Warning] Statement skipped: CREATE INDEX IF NOT EXISTS products_custom_attr_gi... - Error: must be owner of table products
+[Migration Warning] Statement skipped: CREATE INDEX IF NOT EXISTS customers_custom_attr_g... - Error: must be owner of table customers
+[Migration Warning] Statement skipped: CREATE INDEX IF NOT EXISTS suppliers_custom_attr_g... - Error: must be owner of table suppliers
+[Migration Warning] Statement skipped: CREATE INDEX IF NOT EXISTS employees_custom_attr_g... - Error: must be owner of table employees
+[PostgreSQL Migration] Startup migrations and user cards seed applied successfully
 WebSocket server error: Port 24678 is already in use
 [Security Seed] Seeding test users and data...
-[Security Seed Failed] DrizzleQueryError: Failed query: delete from "sale_items" where "sale_items"."company_id" = $1
-params: company_a
-    at NodePgPreparedQuery.queryWithCache (/app/applet/node_modules/src/pg-core/session.ts:73:11)
-    at async <anonymous> (/app/applet/server.ts:1669:21) {
-  query: 'delete from "sale_items" where "sale_items"."company_id" = $1',
-  params: [ 'company_a' ],
-  cause: Error: Cannot use a pool after calling end on the pool
-      at /app/applet/node_modules/pg-pool/index.js:45:11
-      at async <anonymous> (/app/applet/node_modules/src/node-postgres/session.ts:149:14)
-      at async NodePgPreparedQuery.queryWithCache (/app/applet/node_modules/src/pg-core/session.ts:71:12)
-}
 node:events:497
       throw er; // Unhandled 'error' event
       ^

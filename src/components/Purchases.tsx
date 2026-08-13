@@ -138,6 +138,35 @@ export default function Purchases({ purchases, setPurchases }: Props) {
     setSelectedSupplierName(s ? s.name : '');
   };
 
+  const handleConvertLowStockToOrder = (prod: Product) => {
+    const threshold = prod.lowStockThreshold ?? 5;
+    const targetQty = threshold * 2;
+    const suggestedQty = Math.max(1, targetQty - Math.max(0, prod.quantity || 0));
+
+    const existing = cartItems.find(item => item.productId === prod.id);
+    if (existing) {
+      setCartItems(cartItems.map(item => 
+        item.productId === prod.id 
+          ? { ...item, quantity: item.quantity + suggestedQty, total: (item.quantity + suggestedQty) * item.cost }
+          : item
+      ));
+    } else {
+      setCartItems([...cartItems, {
+        productId: prod.id,
+        productName: prod.name,
+        sku: prod.sku || (prod.barcodes && prod.barcodes[0]) || '',
+        unit: 'علبة',
+        cost: prod.cost || 0,
+        sellingPrice: prod.price || 0,
+        quantity: suggestedQty,
+        notes: 'مضاف تلقائياً من نواقص المخزون',
+        total: suggestedQty * (prod.cost || 0)
+      }]);
+    }
+    playSuccessSound();
+    setToast({ message: `تمت إضافة الصنف "${prod.name}" للطلبية بالكمية المقترحة (${suggestedQty})`, type: 'success' });
+  };
+
   const handleAddProductToCart = (prod: Product) => {
     const existing = cartItems.find(item => item.productId === prod.id);
     if (existing) {
@@ -384,6 +413,49 @@ export default function Purchases({ purchases, setPurchases }: Props) {
         setPurchases([...purchases, newPurchObj as Purchase]);
         triggerPurchaseNotification(newPurchObj).catch(err => console.warn('Purchase notification failed:', err));
         setToast({ message: 'تم تسجيل فاتورة المشتريات كلاسيك وحفظها بنجاح!', type: 'success' });
+
+        // Automated WhatsApp Reorder Alert for Suppliers on Low-Stock Items
+        const hasLowStockItem = cartItems.some(item => {
+          const prod = products.find(p => p.id === item.productId);
+          if (prod) {
+            const threshold = prod.lowStockThreshold ?? 5;
+            return (prod.quantity ?? 0) <= threshold;
+          }
+          return false;
+        });
+
+        const supplierObj = suppliers.find(sup => sup.id === selectedSupplierId);
+        if (hasLowStockItem && supplierObj && supplierObj.phone) {
+          const businessName = localStorage.getItem('businessName') || 'مركز المبيعات';
+          let msg = `السلام عليكم ورحمة الله وبركاته،\n`;
+          msg += `أمر توريد نواقص معتمد من *${businessName}*:\n`;
+          msg += `--------------------------------\n`;
+          msg += `📦 *رقم الفاتورة:* ${purchaseData.invoiceNumber || savedId}\n`;
+          msg += `📅 *التاريخ:* ${new Date().toLocaleDateString('ar-EG')}\n`;
+          msg += `--------------------------------\n`;
+          msg += `📋 *الأصناف المطلوبة للتوريد:*\n`;
+          
+          cartItems.forEach((item, idx) => {
+            msg += `🔹 *${idx + 1}. ${item.productName}* - الكمية المطلوبة: *${item.quantity}* (سعر: ${item.cost} ج.م)\n`;
+          });
+          
+          msg += `--------------------------------\n`;
+          msg += `💰 *إجمالي التوريد:* *${finalTotal.toLocaleString()} ج.م*\n`;
+          msg += `💳 *طريقة السداد المتوقعة:* ${paymentMethod === 'cash' ? 'نقداً (كاش)' : paymentMethod === 'deferred-full' ? 'آجل كلي' : 'آجل جزئي'}\n\n`;
+          msg += `يرجى مراجعة وتجهيز الطلبية وتأكيد موعد التوصيل. شكراً لكم! 🙏`;
+
+          let phoneCleaned = supplierObj.phone.replace(/[^0-9]/g, '');
+          if (phoneCleaned.startsWith('01') && phoneCleaned.length === 11) {
+            phoneCleaned = '2' + phoneCleaned;
+          } else if (phoneCleaned.startsWith('05') && phoneCleaned.length === 10) {
+            phoneCleaned = '966' + phoneCleaned.substring(1);
+          }
+          
+          const waUrl = `https://wa.me/${phoneCleaned}?text=${encodeURIComponent(msg)}`;
+          setTimeout(() => {
+            window.open(waUrl, '_blank');
+          }, 1500);
+        }
       }
       playSuccessSound();
       
@@ -490,6 +562,69 @@ export default function Purchases({ purchases, setPurchases }: Props) {
           </span>
         )}
       </div>
+
+      {/* Low-Stock Reorder Alerts Panel */}
+      {(() => {
+        const reorderProducts = products.filter(p => (p.quantity ?? 0) <= (p.lowStockThreshold ?? 5));
+        if (reorderProducts.length === 0) return null;
+        
+        return (
+          <div className="bg-gradient-to-br from-amber-950/25 via-amber-900/10 to-card border border-amber-500/20 p-5 rounded-3xl shadow-sm space-y-3">
+            <div className="flex justify-between items-center border-b border-amber-500/10 pb-2">
+              <div className="flex items-center gap-2">
+                <span className="text-lg animate-pulse">⚠️</span>
+                <div>
+                  <h3 className="text-sm font-black text-amber-400">تنبيه نواقص المخزون (وصلت لحد الطلب)</h3>
+                  <p className="text-[10px] text-text-dim">الأصناف المذكورة أدناه وصلت أو انخفضت عن حد الطلب الآمن.</p>
+                </div>
+              </div>
+              <span className="text-xs bg-amber-500/10 text-amber-400 px-2.5 py-1 rounded-full border border-amber-500/20 font-mono">
+                {reorderProducts.length} أصناف تحتاج توريد
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+              {reorderProducts.map(prod => {
+                const threshold = prod.lowStockThreshold ?? 5;
+                const targetQty = threshold * 2;
+                const suggestedQty = Math.max(1, targetQty - Math.max(0, prod.quantity || 0));
+                
+                return (
+                  <div key={prod.id} className="bg-card2 border border-border hover:border-amber-500/30 transition-all p-3 rounded-2xl flex flex-col justify-between gap-3 text-xs">
+                    <div>
+                      <div className="flex justify-between items-start gap-2">
+                        <strong className="text-text-main font-bold truncate block flex-1">{prod.name}</strong>
+                        <span className="text-[9px] bg-amber-500/10 text-amber-400 px-1.5 py-0.5 rounded-md font-mono border border-amber-500/25">
+                          حد الطلب: {threshold}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 mt-2 text-[11px] text-text-dim">
+                        <div>
+                          <span>المخزون الحالي:</span>
+                          <span className="block font-black text-danger font-mono mt-0.5">{prod.quantity ?? 0} {prod.unit || 'علبة'}</span>
+                        </div>
+                        <div>
+                          <span>الكمية المقترحة:</span>
+                          <span className="block font-black text-emerald-400 font-mono mt-0.5">+{suggestedQty} {prod.unit || 'علبة'}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleConvertLowStockToOrder(prod)}
+                      className="w-full py-2 bg-amber-500/10 hover:bg-amber-500 text-amber-400 hover:text-white border border-amber-500/20 rounded-xl font-bold transition-all flex items-center justify-center gap-1.5 active:scale-95 text-[11px]"
+                    >
+                      <span>📥</span>
+                      <span>تحويل لأمر توريد (+{suggestedQty})</span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Main Billing Form */}
       <div className="bg-card p-5 sm:p-6 rounded-3xl border border-border space-y-5 shadow-lg relative">

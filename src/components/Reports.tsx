@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Purchase, Sale, Product, Expense, Customer, Supplier, BusinessType, Branch } from '../types/types';
+import { Purchase, Sale, Product, Expense, Customer, Supplier, BusinessType, Branch, Queue, QueueTicket, JobCard, BusinessService, RestaurantTable } from '../types/types';
 import { deleteSale, deletePurchase, getUserPreferences } from '../lib/firestoreService';
 import { useTenant } from '../context/TenantContext';
 import ColumnManagerModal from './ColumnManagerModal';
@@ -53,7 +53,10 @@ import {
   Truck,
   Receipt,
   Search,
-  Package
+  Package,
+  LayoutGrid,
+  Settings2,
+  Users
 } from 'lucide-react';
 import FinancialRatiosCard, { FinancialRatiosData } from './reports/FinancialRatiosCard';
 import AbcAnalysisCard from './reports/AbcAnalysisCard';
@@ -72,6 +75,11 @@ interface Props {
   customers?: Customer[];
   suppliers?: Supplier[];
   branches?: Branch[];
+  queues?: Queue[];
+  queueTickets?: QueueTicket[];
+  jobCards?: JobCard[];
+  businessServices?: BusinessService[];
+  restaurantTables?: RestaurantTable[];
   setSales?: React.Dispatch<React.SetStateAction<Sale[]>>;
   onSaleDeleted?: (saleId: string) => void;
   setPurchases?: React.Dispatch<React.SetStateAction<Purchase[]>>;
@@ -94,7 +102,8 @@ export type ReportTab =
   | 'inventory' 
   | 'item_ledger'
   | 'tax'
-  | 'advanced';
+  | 'advanced'
+  | 'business_performance';
 
 type DatePreset = 'all' | 'today' | 'yesterday' | 'week' | 'month' | 'lastMonth' | 'custom';
 
@@ -108,6 +117,11 @@ export default function Reports({
   customers = [],
   suppliers = [],
   branches = [],
+  queues = [],
+  queueTickets = [],
+  jobCards = [],
+  businessServices = [],
+  restaurantTables = [],
   setSales,
   onSaleDeleted,
   setPurchases,
@@ -1177,6 +1191,58 @@ export default function Reports({
     };
   }, [filteredSales, filteredPurchases, products, branches]);
 
+  const businessPerformanceStats = useMemo(() => {
+    // 1. Queue Performance
+    const queueStats = queues.map(q => {
+      const tickets = queueTickets.filter(t => t.queueId === q.id);
+      const waiting = tickets.filter(t => t.status === 'WAITING').length;
+      const served = tickets.filter(t => t.status === 'SERVING' || t.status === 'COMPLETED').length;
+      return {
+        name: q.name,
+        waiting,
+        served,
+        total: tickets.length
+      };
+    });
+
+    // 2. Workshop Performance
+    const jobCardStats = {
+      pending: jobCards.filter(j => j.status === 'PENDING').length,
+      inProgress: jobCards.filter(j => j.status === 'IN_PROGRESS').length,
+      completed: jobCards.filter(j => j.status === 'COMPLETED').length,
+      delivered: jobCards.filter(j => j.status === 'COMPLETED').length
+    };
+
+    // 3. Restaurant Performance
+    const tableStats = {
+      available: restaurantTables.filter(t => t.status === 'AVAILABLE').length,
+      occupied: restaurantTables.filter(t => t.status === 'OCCUPIED').length,
+      reserved: restaurantTables.filter(t => t.status === 'RESERVED').length,
+      total: restaurantTables.length
+    };
+
+    // 4. Services Popularity
+    const serviceSales = new Map<string, { name: string, count: number, revenue: number }>();
+    filteredSales.forEach(s => {
+      s.items?.forEach(item => {
+        const srv = businessServices.find(b => b.id === item.productId);
+        if (srv) {
+          const existing = serviceSales.get(srv.id) || { name: srv.name, count: 0, revenue: 0 };
+          existing.count += item.quantity || 1;
+          existing.revenue += (item.price || 0) * (item.quantity || 1);
+          serviceSales.set(srv.id, existing);
+        }
+      });
+    });
+
+    return {
+      queueStats,
+      jobCardStats,
+      tableStats,
+      servicePopularity: Array.from(serviceSales.values()).sort((a, b) => b.revenue - a.revenue).slice(0, 5)
+    };
+  }, [queues, queueTickets, jobCards, restaurantTables, businessServices, filteredSales]);
+
   // Direct CSV Exporter with Arabic BOM support
   const exportToCSV = (data: any[], filename: string, headers: { [key: string]: string }) => {
     if (!data || data.length === 0) {
@@ -1449,6 +1515,7 @@ export default function Reports({
             { id: 'inventory', label: 'المخزون والنواقص', icon: '⚠️' },
             { id: 'item_ledger', label: 'كارت حركة الصنف', icon: '📋' },
             { id: 'tax', label: 'الإقرار الضريبي (VAT)', icon: '🧾' },
+            { id: 'business_performance', label: 'أداء مديولات الأعمال', icon: '🚀', highlight: true },
             { id: 'advanced', label: 'التحليل المتقدم والفروع', icon: '🔮', highlight: true }
           ] as const
         ).map(tab => (
@@ -3098,6 +3165,176 @@ export default function Reports({
                       <td colSpan={8} className="p-8 text-center text-text-dim">
                         لا توجد حركة مسجلة للأصناف في النطاق المحدد
                       </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'business_performance' && (
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Restaurant Stats Card */}
+            <div className="bg-card p-6 rounded-4xl border border-border shadow-sm relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-4 opacity-10">
+                <LayoutGrid size={48} className="text-gold" />
+              </div>
+              <h3 className="text-sm font-bold text-text-dim mb-4">إشغال المطعم 🍽️</h3>
+              <div className="flex items-end gap-2 mb-4">
+                <span className="text-3xl font-black text-text-main">{businessPerformanceStats.tableStats.occupied}</span>
+                <span className="text-sm text-text-dim mb-1">/ {businessPerformanceStats.tableStats.total} طاولات مشغولة</span>
+              </div>
+              <div className="w-full bg-background rounded-full h-2 overflow-hidden">
+                <div 
+                  className="bg-gold h-full rounded-full transition-all duration-1000"
+                  style={{ width: `${(businessPerformanceStats.tableStats.occupied / (businessPerformanceStats.tableStats.total || 1)) * 100}%` }}
+                />
+              </div>
+              <div className="flex justify-between mt-3 text-[10px] font-bold">
+                <span className="text-emerald-500">متاح: {businessPerformanceStats.tableStats.available}</span>
+                <span className="text-amber-500">محجوز: {businessPerformanceStats.tableStats.reserved}</span>
+              </div>
+            </div>
+
+            {/* Queue Stats Card */}
+            <div className="bg-card p-6 rounded-4xl border border-border shadow-sm relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-4 opacity-10">
+                <Clock size={48} className="text-emerald-500" />
+              </div>
+              <h3 className="text-sm font-bold text-text-dim mb-4">حالة الانتظار 🎟️</h3>
+              <div className="flex items-end gap-2 mb-4">
+                <span className="text-3xl font-black text-text-main">
+                  {businessPerformanceStats.queueStats.reduce((sum, q) => sum + q.waiting, 0)}
+                </span>
+                <span className="text-sm text-text-dim mb-1">عملاء في الانتظار</span>
+              </div>
+              <div className="text-[10px] text-text-dim">
+                تم خدمة <b className="text-emerald-500">{businessPerformanceStats.queueStats.reduce((sum, q) => sum + q.served, 0)}</b> عملاء اليوم
+              </div>
+            </div>
+
+            {/* Workshop Stats Card */}
+            <div className="bg-card p-6 rounded-4xl border border-border shadow-sm relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-4 opacity-10">
+                <Settings2 size={48} className="text-blue-500" />
+              </div>
+              <h3 className="text-sm font-bold text-text-dim mb-4">أداء الورشة 🚗</h3>
+              <div className="flex items-end gap-2 mb-4">
+                <span className="text-3xl font-black text-text-main">{businessPerformanceStats.jobCardStats.inProgress}</span>
+                <span className="text-sm text-text-dim mb-1">سيارات تحت الإصلاح</span>
+              </div>
+              <div className="flex gap-2 text-[10px] font-bold">
+                <span className="bg-blue-500/10 text-blue-500 px-2 py-0.5 rounded-lg">جاهز: {businessPerformanceStats.jobCardStats.completed}</span>
+                <span className="bg-emerald-500/10 text-emerald-500 px-2 py-0.5 rounded-lg">مسلم: {businessPerformanceStats.jobCardStats.delivered}</span>
+              </div>
+            </div>
+
+            {/* Service Popularity Card */}
+            <div className="bg-card p-6 rounded-4xl border border-border shadow-sm relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-4 opacity-10">
+                <Sparkles size={48} className="text-purple-500" />
+              </div>
+              <h3 className="text-sm font-bold text-text-dim mb-4">الخدمة الأكثر طلباً 🛠️</h3>
+              {businessPerformanceStats.servicePopularity.length > 0 ? (
+                <div>
+                  <div className="text-xl font-black text-text-main truncate">{businessPerformanceStats.servicePopularity[0].name}</div>
+                  <div className="text-[10px] text-text-dim mt-1">
+                    إجمالي الإيرادات: <b className="text-gold">{businessPerformanceStats.servicePopularity[0].revenue.toLocaleString('ar-EG')} ج.م</b>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-sm text-text-dim italic">لا توجد بيانات خدمات بعد</div>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Queue Detail Chart */}
+            <div className="bg-card p-6 rounded-4xl border border-border shadow-sm">
+              <h3 className="font-bold text-sm text-text-main mb-6 flex items-center gap-2">
+                <Users size={18} className="text-gold" />
+                <span>تحليل طوابير الانتظار حسب النوع</span>
+              </h3>
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={businessPerformanceStats.queueStats}>
+                    <XAxis dataKey="name" stroke="#94A3B8" fontSize={11} />
+                    <YAxis stroke="#94A3B8" fontSize={11} />
+                    <Tooltip 
+                      contentStyle={{ backgroundColor: '#1E293B', borderColor: '#334155', borderRadius: '12px', color: '#FFF' }}
+                    />
+                    <Legend />
+                    <Bar dataKey="waiting" name="في الانتظار" fill="#F59E0B" radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="served" name="تمت الخدمة" fill="#10B981" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            {/* Workshop Status Distribution */}
+            <div className="bg-card p-6 rounded-4xl border border-border shadow-sm">
+              <h3 className="font-bold text-sm text-text-main mb-6 flex items-center gap-2">
+                <Activity size={18} className="text-blue-500" />
+                <span>توزيع كروت العمل في الورشة</span>
+              </h3>
+              <div className="h-64">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={[
+                        { name: 'بانتظار البدء', value: businessPerformanceStats.jobCardStats.pending },
+                        { name: 'قيد العمل', value: businessPerformanceStats.jobCardStats.inProgress },
+                        { name: 'مكتمل', value: businessPerformanceStats.jobCardStats.completed },
+                        { name: 'تم التسليم', value: businessPerformanceStats.jobCardStats.delivered },
+                      ].filter(d => d.value > 0)}
+                      innerRadius={60}
+                      outerRadius={80}
+                      paddingAngle={5}
+                      dataKey="value"
+                    >
+                      {[ '#94A3B8', '#3B82F6', '#F59E0B', '#10B981' ].map((color, index) => (
+                        <Cell key={`cell-${index}`} fill={color} />
+                      ))}
+                    </Pie>
+                    <Tooltip 
+                      contentStyle={{ backgroundColor: '#1E293B', borderColor: '#334155', borderRadius: '12px', color: '#FFF' }}
+                    />
+                    <Legend />
+                  </PieChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          </div>
+
+          {/* Popular Services Table */}
+          <div className="bg-card p-6 rounded-4xl border border-border shadow-sm">
+            <h3 className="font-bold text-sm text-text-main mb-6 flex items-center gap-2">
+              <TrendingUp size={18} className="text-emerald-500" />
+              <span>أكثر الخدمات مبيعاً وتحقيقاً للأرباح</span>
+            </h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-right text-xs">
+                <thead>
+                  <tr className="text-text-dim border-b border-border">
+                    <th className="pb-3 pr-2">الخدمة</th>
+                    <th className="pb-3 text-center">عدد المرات</th>
+                    <th className="pb-3 text-left pl-2">إجمالي الإيراد</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {businessPerformanceStats.servicePopularity.map((srv, idx) => (
+                    <tr key={idx} className="border-b border-border/50 last:border-0 hover:bg-background/50 transition-colors">
+                      <td className="py-4 pr-2 font-bold text-text-main">{srv.name}</td>
+                      <td className="py-4 text-center text-text-dim">{srv.count} مرة</td>
+                      <td className="py-4 text-left pl-2 font-black text-gold">{srv.revenue.toLocaleString('ar-EG')} ج.م</td>
+                    </tr>
+                  ))}
+                  {businessPerformanceStats.servicePopularity.length === 0 && (
+                    <tr>
+                      <td colSpan={3} className="py-8 text-center text-text-dim italic">لا توجد بيانات مبيعات خدمات متاحة للفترة المحددة</td>
                     </tr>
                   )}
                 </tbody>

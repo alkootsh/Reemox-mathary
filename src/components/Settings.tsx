@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { BusinessType, AppConfig } from '../types/types';
+import { BusinessType, AppConfig, Company } from '../types/types';
+import { useTenant } from '../context/TenantContext';
 import { safeParse } from '../lib/json';
 import ActivationPanel from './ActivationPanel';
 import UserManagement from './UserManagement';
@@ -13,6 +14,9 @@ import {
   saveProduct,
   saveCustomer,
   saveSupplier,
+  saveCompany,
+  getCompanies,
+  deleteCompany,
   seedArabicDemoData
 } from '../lib/firestoreService';
 import { POSDesignType } from './pos/POSDesignSelectorModal';
@@ -37,6 +41,7 @@ import {
   MessageSquare, 
   Mail, 
   Send, 
+  Plus,
   CheckCircle2, 
   AlertTriangle, 
   ExternalLink, 
@@ -68,6 +73,8 @@ import {
 } from 'lucide-react';
 
 export default function Settings({ appConfig, setAppConfig }: { appConfig: AppConfig; setAppConfig: (config: AppConfig) => void; }) {
+  const { companyId, setCompanyId } = useTenant();
+  const [companies, setCompanies] = useState<Company[]>([]);
   const [businessType, setBusinessType] = useState<BusinessType>(appConfig.businessType);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'warning' } | null>(null);
   
@@ -143,6 +150,10 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
   const [isImporting, setIsImporting] = useState(false);
   
   const [showDevSettings, setShowDevSettings] = useState(false);
+
+  useEffect(() => {
+    getCompanies().then(setCompanies);
+  }, []);
   const [devPassword, setDevPassword] = useState('');
   const [newDevPassword, setNewDevPassword] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -256,6 +267,10 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
 
   useEffect(() => {
     checkServerStatus();
+    fetch('/api/companies')
+      .then(res => res.json())
+      .then(data => setCompanies(data))
+      .catch(err => console.error('Failed to fetch companies', err));
   }, []);
 
   const handleSaveNotifications = () => {
@@ -692,6 +707,100 @@ export default function Settings({ appConfig, setAppConfig }: { appConfig: AppCo
         <span>⚙️</span>
         <span>إعدادات النظام والضرائب</span>
       </h2>
+
+      {/* Company Setting */}
+      <div className="bg-card p-6 rounded-4xl border border-border shadow-sm">
+        <div className="flex justify-between items-center mb-6">
+          <div>
+            <h3 className="text-lg font-bold text-text-main flex items-center gap-2">
+              <Store className="text-gold" size={20} />
+              <span>إدارة الشركات والمؤسسات</span>
+            </h3>
+            <p className="text-xs text-text-dim mt-1">يمكنك إضافة أكثر من شركة وإدارة بيانات كل واحدة على حدة</p>
+          </div>
+          <button 
+            onClick={() => {
+              const name = prompt('أدخل اسم الشركة الجديدة:');
+              if (name) saveCompany({ name, isActive: true }).then(() => window.location.reload());
+            }} 
+            className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl text-xs font-bold shadow-sm transition-all flex items-center gap-2"
+          >
+            <Plus size={14} />
+            إضافة شركة
+          </button>
+          {companies.some(c => !c.isActive) && (
+            <button 
+              onClick={() => {
+                if (confirm('هل أنت متأكد من حذف جميع الشركات غير النشطة نهائياً؟')) {
+                  const inactiveIds = companies.filter(c => !c.isActive).map(c => c.id);
+                  Promise.all(inactiveIds.map(id => deleteCompany(id))).then(() => window.location.reload());
+                }
+              }} 
+              className="bg-red-600/10 text-red-500 hover:bg-red-600 hover:text-white px-4 py-2 rounded-xl text-xs font-bold shadow-sm transition-all flex items-center gap-2 border border-red-500/20"
+            >
+              <Trash2 size={14} />
+              حذف الشركات غير النشطة
+            </button>
+          )}
+        </div>
+
+        <div className="space-y-4">
+          {companies.map(c => (
+            <div key={c.id} className={`p-4 rounded-3xl border-2 transition-all flex items-center justify-between ${companyId === c.id ? 'border-gold bg-gold/5' : 'border-border bg-background/50'}`}>
+              <div className="flex items-center gap-4">
+                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-bold text-lg ${companyId === c.id ? 'bg-gold text-white' : 'bg-card text-text-dim border border-border'}`}>
+                  {c.name.charAt(0)}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-bold text-text-main">{c.name}</h4>
+                    {companyId === c.id && <span className="bg-gold/20 text-gold text-[10px] px-2 py-0.5 rounded-full font-bold">نشطة حالياً</span>}
+                    {!c.isActive && <span className="bg-red-500/20 text-red-400 text-[10px] px-2 py-0.5 rounded-full font-bold">غير نشطة</span>}
+                  </div>
+                  <p className="text-[10px] text-text-dim mt-0.5">ID: {c.id}</p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={() => {
+                    saveCompany({ ...c, isActive: !c.isActive }).then(() => window.location.reload());
+                  }}
+                  className={`p-2 rounded-xl text-xs font-bold transition-all ${c.isActive ? 'bg-amber-500/10 text-amber-500 hover:bg-amber-500 hover:text-white' : 'bg-emerald-500/10 text-emerald-500 hover:bg-emerald-500 hover:text-white'}`}
+                  title={c.isActive ? 'إيقاف النشاط' : 'تفعيل الشركة'}
+                >
+                  {c.isActive ? 'إيقاف' : 'تفعيل'}
+                </button>
+                {companyId !== c.id && (
+                  <button 
+                    onClick={() => {
+                      setCompanyId(c.id);
+                      window.location.reload();
+                    }}
+                    className="p-2 bg-gold/10 text-gold hover:bg-gold hover:text-white rounded-xl text-xs font-bold transition-all"
+                  >
+                    تبديل إليها
+                  </button>
+                )}
+                <button 
+                  onClick={() => {
+                    if (confirm('هل أنت متأكد من حذف هذه الشركة وكل بياناتها؟')) {
+                      deleteCompany(c.id).then(() => {
+                        if (companyId === c.id) setCompanyId('company_default');
+                        window.location.reload();
+                      });
+                    }
+                  }}
+                  className="p-2 bg-danger/10 text-danger hover:bg-danger hover:text-white rounded-xl text-xs font-bold transition-all"
+                  title="حذف الشركة"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
 
       {/* Theme Setting */}
       <div className="bg-card p-5 rounded-4xl border border-border flex justify-between items-center">

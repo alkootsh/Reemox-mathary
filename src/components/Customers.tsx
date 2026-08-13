@@ -7,6 +7,8 @@ import CustomerStatementModal from './CustomerStatementModal';
 import ColumnManagerModal from './ColumnManagerModal';
 import { CUSTOMERS_COLUMNS, CUSTOMERS_DEFAULT_VISIBLE } from '../lib/columns';
 import { playSuccessSound, playWarningSound } from '../lib/sound';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
+import { Clock } from 'lucide-react';
 import { 
   Users, 
   UserPlus, 
@@ -48,6 +50,89 @@ export default function Customers() {
 
   const userEmail = currentUser?.email || currentUser?.username || 'admin';
   const hasUnsavedData = Boolean(newCustomer.name || newCustomer.phone || newCustomer.openingBalance);
+
+  // Points & Loyalty Calculations
+  const customerStats = React.useMemo(() => {
+    return customers.map(c => {
+      // Sum sales for this customer
+      const customerSales = sales.filter(s => s.customerId === c.id);
+      const totalSpent = customerSales.reduce((sum, s) => sum + (s.finalTotal || s.total || 0), 0);
+      
+      // Calculate points (1 point per 10 EGP spent)
+      const points = Math.floor(totalSpent / 10);
+      
+      // Determine Tier
+      let tier = 'برونزي';
+      let tierColor = 'text-amber-500 bg-amber-500/10 border-amber-500/20';
+      let badge = '🥉';
+      if (points >= 5000) {
+        tier = 'بلاتيني';
+        tierColor = 'text-cyan-400 bg-cyan-500/10 border-cyan-500/20';
+        badge = '💎';
+      } else if (points >= 1500) {
+        tier = 'ذهبي';
+        tierColor = 'text-amber-400 bg-amber-500/10 border-amber-500/20';
+        badge = '👑';
+      } else if (points >= 500) {
+        tier = 'فضي';
+        tierColor = 'text-slate-300 bg-slate-500/10 border-slate-500/20';
+        badge = '🥈';
+      }
+
+      return {
+        ...c,
+        totalSpent,
+        points,
+        tier,
+        tierColor,
+        badge,
+        salesCount: customerSales.length
+      };
+    });
+  }, [customers, sales]);
+
+  const tierDistribution = React.useMemo(() => {
+    const counts = { Bronze: 0, Silver: 0, Gold: 0, Platinum: 0 };
+    customerStats.forEach(c => {
+      if (c.points >= 5000) counts.Platinum++;
+      else if (c.points >= 1500) counts.Gold++;
+      else if (c.points >= 500) counts.Silver++;
+      else counts.Bronze++;
+    });
+
+    return [
+      { name: 'بلاتيني 💎', value: counts.Platinum, color: '#22d3ee' },
+      { name: 'ذهبي 👑', value: counts.Gold, color: '#f5a623' },
+      { name: 'فضي 🥈', value: counts.Silver, color: '#94a3b8' },
+      { name: 'برونزي 🥉', value: counts.Bronze, color: '#b45309' },
+    ].filter(t => t.value > 0 || t.name === 'برونزي 🥉');
+  }, [customerStats]);
+
+  const last5Purchasers = React.useMemo(() => {
+    // Sort sales by date descending
+    const sortedSales = [...sales]
+      .filter(s => s.customerId && s.customerId !== 'cash-customer')
+      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    
+    // Get unique latest 5
+    const uniqueBuyers: { id: string; name: string; date: string; amount: number; pointsEarned: number }[] = [];
+    const seenIds = new Set<string>();
+
+    for (const sale of sortedSales) {
+      if (uniqueBuyers.length >= 5) break;
+      if (!seenIds.has(sale.customerId)) {
+        seenIds.add(sale.customerId);
+        uniqueBuyers.push({
+          id: sale.customerId,
+          name: sale.customerName || 'عميل غير معروف',
+          date: sale.date,
+          amount: sale.finalTotal || sale.total || 0,
+          pointsEarned: Math.floor((sale.finalTotal || sale.total || 0) / 10)
+        });
+      }
+    }
+    return uniqueBuyers;
+  }, [sales]);
 
   useEffect(() => {
     loadCustomers();
@@ -230,6 +315,125 @@ export default function Customers() {
             <span className="text-text-dim block text-[10px]">إجمالي ديون العملاء</span>
             <span className="font-black text-sm text-danger font-mono">{totalDebts.toLocaleString()} ج.م</span>
           </div>
+        </div>
+      </div>
+
+      {/* Loyalty & Points Dashboard */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-gradient-to-br from-card2 via-card to-card border border-border p-5 rounded-3xl shadow-sm">
+        {/* Left: Recharts Pie Chart representing Tier Distribution */}
+        <div className="md:col-span-2 space-y-3">
+          <div className="flex items-center gap-2 border-b border-border/60 pb-2">
+            <span className="text-lg">👑</span>
+            <h3 className="text-sm font-black text-text-main">توزيع العملاء حسب فئات الولاء (نظام النقاط)</h3>
+          </div>
+          
+          <div className="grid grid-cols-1 sm:grid-cols-2 items-center gap-4">
+            {/* Pie Chart container */}
+            <div className="h-44 w-full relative">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={tierDistribution}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={45}
+                    outerRadius={65}
+                    paddingAngle={3}
+                    dataKey="value"
+                  >
+                    {tierDistribution.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip 
+                    contentStyle={{ backgroundColor: '#1f2937', borderColor: '#374151', borderRadius: '12px', fontSize: '11px', color: '#fff' }} 
+                    itemStyle={{ color: '#fff' }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+              {/* Centered Total Customers */}
+              <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center">
+                <span className="text-2xl font-black font-mono text-gold leading-none">{customers.length}</span>
+                <span className="text-[9px] text-text-dim mt-0.5">عميل مسجل</span>
+              </div>
+            </div>
+
+            {/* Custom Legend / Distribution stats */}
+            <div className="space-y-2">
+              <span className="text-[10px] text-text-dim block mb-1">فئات ونظام النقاط (1 نقطة لكل 10 ج.م مبيعات):</span>
+              <div className="grid grid-cols-2 gap-2 text-[11px]">
+                <div className="flex items-center gap-1.5 p-1.5 rounded-xl bg-cyan-500/5 border border-cyan-500/15">
+                  <span className="w-2.5 h-2.5 rounded-full bg-cyan-400"></span>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-text-dim block text-[9px] leading-tight">بلاتيني (5000+)</span>
+                    <strong className="text-cyan-400 font-mono">
+                      {tierDistribution.find(t => t.name.includes('بلاتيني'))?.value || 0} عميل
+                    </strong>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 p-1.5 rounded-xl bg-gold/5 border border-gold/15">
+                  <span className="w-2.5 h-2.5 rounded-full bg-gold"></span>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-text-dim block text-[9px] leading-tight">ذهبي (1500+)</span>
+                    <strong className="text-gold font-mono">
+                      {tierDistribution.find(t => t.name.includes('ذهبي'))?.value || 0} عميل
+                    </strong>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 p-1.5 rounded-xl bg-slate-400/5 border border-slate-400/15">
+                  <span className="w-2.5 h-2.5 rounded-full bg-slate-400"></span>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-text-dim block text-[9px] leading-tight">فضي (500+)</span>
+                    <strong className="text-slate-300 font-mono">
+                      {tierDistribution.find(t => t.name.includes('فضي'))?.value || 0} عميل
+                    </strong>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 p-1.5 rounded-xl bg-amber-700/5 border border-amber-700/15">
+                  <span className="w-2.5 h-2.5 rounded-full bg-amber-700"></span>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-text-dim block text-[9px] leading-tight">برونزي (0+)</span>
+                    <strong className="text-amber-500 font-mono">
+                      {tierDistribution.find(t => t.name.includes('برونزي'))?.value || 0} عميل
+                    </strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Right: Last 5 Customers Who Purchased */}
+        <div className="border-t md:border-t-0 md:border-r border-border/60 pt-3 md:pt-0 md:pr-4 space-y-3">
+          <div className="flex items-center gap-2 border-b border-border/60 pb-2">
+            <span className="text-lg">🛒</span>
+            <h3 className="text-sm font-black text-text-main">آخر 5 عملاء قاموا بالشراء</h3>
+          </div>
+
+          {last5Purchasers.length === 0 ? (
+            <div className="py-8 text-center text-text-dim text-[11px] space-y-1">
+              <Clock size={20} className="mx-auto opacity-35 animate-pulse" />
+              <p>لا توجد مبيعات مسجلة لعملاء حالياً</p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {last5Purchasers.map((p, index) => (
+                <div key={p.id + '-' + index} className="flex items-center justify-between p-2 rounded-xl bg-card2 border border-border/60 hover:border-gold/30 transition-all text-[11px]">
+                  <div className="min-w-0 flex-1 pl-2">
+                    <span className="font-bold text-text-main block truncate">{p.name}</span>
+                    <span className="text-[10px] text-text-dim font-mono">{new Date(p.date).toLocaleDateString('ar-EG')}</span>
+                  </div>
+                  <div className="text-left font-mono">
+                    <span className="text-text-main block font-black">{p.amount.toLocaleString()} ج.م</span>
+                    <span className="text-[10px] text-emerald-400 font-bold">+{p.pointsEarned} نقطة</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -439,6 +643,7 @@ export default function Customers() {
                   const balance = Number(c.currentBalance ?? c.openingBalance) || 0;
                   const creditLimit = Number(c.creditLimit) || 0;
                   const isOverLimit = creditLimit > 0 && balance > creditLimit;
+                  const stat = customerStats.find(s => s.id === c.id) || { points: 0, tier: 'برونزي', badge: '🥉', tierColor: '' };
 
                   return (
                     <tr key={c.id} className="hover:bg-card2/50 transition-colors">
@@ -448,7 +653,11 @@ export default function Customers() {
                           case 'name':
                             return (
                               <td key={colKey} className="p-3 font-bold text-text-main flex items-center gap-2">
-                                <span>{c.name}</span>
+                                <span className="text-base" title={stat.tier}>{stat.badge}</span>
+                                <div className="flex flex-col">
+                                  <span>{c.name}</span>
+                                  <span className="text-[10px] text-emerald-400 font-mono font-bold">{stat.points} نقطة ({stat.tier})</span>
+                                </div>
                                 {isOverLimit && <span className="text-[9px] bg-danger text-white px-1.5 py-0.5 rounded-full font-bold">تجاوز الائتمان</span>}
                               </td>
                             );
@@ -591,6 +800,7 @@ export default function Customers() {
               const balance = Number(c.currentBalance ?? c.openingBalance) || 0;
               const creditLimit = Number(c.creditLimit) || 0;
               const isOverLimit = creditLimit > 0 && balance > creditLimit;
+              const stat = customerStats.find(s => s.id === c.id) || { points: 0, tier: 'برونزي', badge: '🥉', tierColor: '' };
               return (
                 <div 
                   key={c.id} 
@@ -598,12 +808,17 @@ export default function Customers() {
                 >
                   <div className="flex justify-between items-start">
                     <div>
-                      <h4 className="font-black text-sm text-text-main flex items-center gap-2">
-                        {c.name}
+                      <h4 className="font-black text-sm text-text-main flex items-center gap-1.5">
+                        <span className="text-base" title={stat.tier}>{stat.badge}</span>
+                        <span>{c.name}</span>
                         {isOverLimit && <span className="text-[10px] bg-danger text-white px-2 py-0.5 rounded-full">تجاوز حد الائتمان</span>}
                       </h4>
+                      <p className="text-[10px] text-emerald-400 font-mono font-bold flex items-center gap-1 mt-0.5">
+                        <span>✨ رصيد الولاء: {stat.points} نقطة</span>
+                        <span className="text-text-dim">({stat.tier})</span>
+                      </p>
                       {c.phone && (
-                        <p className="text-text-dim text-xs flex items-center gap-1 mt-0.5 font-mono">
+                        <p className="text-text-dim text-xs flex items-center gap-1 mt-1 font-mono">
                           <Phone size={12} className="text-gold" />
                           <span>{c.phone}</span>
                         </p>

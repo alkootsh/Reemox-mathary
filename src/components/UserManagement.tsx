@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { AppUser, UserRole } from '../types/types';
-import { getUsers, saveUser, deleteUser, updateUserCard, getAuditLogs } from '../lib/firestoreService';
+import { AppUser, UserRole, Branch } from '../types/types';
+import { getUsers, saveUser, deleteUser, updateUserCard, getAuditLogs, getBranches } from '../lib/firestoreService';
 import { getTreasuries, getWarehouses, Treasury, Warehouse } from '../lib/treasuryWarehouseService';
 import Toast from './Toast';
 import { playSuccessSound, playWarningSound, playAlertSound } from '../lib/sound';
@@ -10,6 +10,7 @@ export default function UserManagement() {
   const [users, setUsers] = useState<AppUser[]>([]);
   const [treasuries, setTreasuries] = useState<Treasury[]>([]);
   const [warehouses, setWarehouses] = useState<Warehouse[]>([]);
+  const [branches, setBranches] = useState<Branch[]>([]);
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'warning' } | null>(null);
 
@@ -22,6 +23,7 @@ export default function UserManagement() {
   const [cashierType, setCashierType] = useState<'retail' | 'wholesale'>('retail');
   const [selectedTreasuryId, setSelectedTreasuryId] = useState<string>('treasury-main');
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<string>('wh-main');
+  const [selectedBranchId, setSelectedBranchId] = useState<string>('branch_main');
   const [phone, setPhone] = useState('');
   const [canEditPrice, setCanEditPrice] = useState<boolean>(true);
 
@@ -53,6 +55,7 @@ export default function UserManagement() {
     loadUsers();
     setTreasuries(getTreasuries());
     setWarehouses(getWarehouses());
+    getBranches('company_default').then(setBranches);
   }, []);
 
   // Keyboard wedge listener for scanning when in scan mode
@@ -140,6 +143,7 @@ export default function UserManagement() {
         treasuryName: selectedTreasuryObj?.name || 'الخزنة الرئيسية',
         warehouseId: selectedWarehouseId,
         warehouseName: selectedWarehouseObj?.name || 'المخزن الرئيسي',
+        branchId: selectedBranchId,
         phone: phone.trim(),
         canEditPrice: role === 'admin' ? true : canEditPrice,
         employeeCode: employeeCode.trim() || undefined,
@@ -189,6 +193,7 @@ export default function UserManagement() {
     setCashierType(user.cashierType || 'retail');
     setSelectedTreasuryId(user.treasuryId || 'treasury-main');
     setSelectedWarehouseId(user.warehouseId || 'wh-main');
+    setSelectedBranchId(user.branchId || 'branch_main');
     setPhone(user.phone || '');
     setCanEditPrice(user.role === 'admin' ? true : (user.canEditPrice !== false));
     setEmployeeCode(user.employeeCode || '');
@@ -551,6 +556,24 @@ export default function UserManagement() {
               {warehouses.map(w => (
                 <option key={w.id} value={w.id}>
                   {w.name} {w.location ? `(${w.location})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold mb-1.5 text-blue-400 flex items-center gap-1">
+              <span>🏢</span>
+              <span>الفرع المربوط المخصص:</span>
+            </label>
+            <select
+              className="w-full bg-card2 border border-blue-500/40 p-3 rounded-2xl text-sm font-bold text-text-main focus:border-blue-500 focus:outline-none"
+              value={selectedBranchId}
+              onChange={e => setSelectedBranchId(e.target.value)}
+            >
+              {branches.map(b => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
                 </option>
               ))}
             </select>

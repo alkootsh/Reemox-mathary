@@ -1,4 +1,5 @@
 import { db, createPool } from './index.ts';
+import { analyzeWithAI } from '../lib/ai.ts';
 import { 
   companies, branches, users, memberships, products, categories, units,
   sales, saleItems, payments, inventoryMovements, cashierSessions, 
@@ -8,7 +9,9 @@ import {
   userPermissions, productPrices, accounts, journalEntries, journalItems, costCenters,
   billsOfMaterials, bomItems, employees, payroll, loyaltyPoints, customerInteractions, productBatches,
   aiConfigs, userAiMemories, systemTelemetry,
-  companyModuleOverrides, branchModuleOverrides, customFieldDefinitions
+  companyModuleOverrides, branchModuleOverrides, customFieldDefinitions, columnConfigurations,
+  workflowDefinitions, workflowSteps, workflowTransitions, workflowHistory,
+  queues, queueTickets, jobCards, businessServices, restaurantTables
 } from './schema.ts';
 import { eq, and, sql, desc, ne } from 'drizzle-orm';
 
@@ -33,7 +36,22 @@ export async function runStartupMigrations() {
       `ALTER TABLE users ADD COLUMN IF NOT EXISTS card_status text DEFAULT 'ACTIVE'`,
       `ALTER TABLE users ADD COLUMN IF NOT EXISTS status text DEFAULT 'ACTIVE'`,
       `CREATE UNIQUE INDEX IF NOT EXISTS users_employee_card_id_idx ON users(employee_card_id) WHERE employee_card_id IS NOT NULL`,
-      `ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS branch_id text`
+      `ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS branch_id text`,
+      `ALTER TABLE products ADD COLUMN IF NOT EXISTS custom_attributes jsonb DEFAULT '{}'`,
+      `ALTER TABLE customers ADD COLUMN IF NOT EXISTS custom_attributes jsonb DEFAULT '{}'`,
+      `ALTER TABLE suppliers ADD COLUMN IF NOT EXISTS custom_attributes jsonb DEFAULT '{}'`,
+      `ALTER TABLE employees ADD COLUMN IF NOT EXISTS custom_attributes jsonb DEFAULT '{}'`,
+      `ALTER TABLE custom_field_definitions ADD COLUMN IF NOT EXISTS default_value text`,
+      `ALTER TABLE custom_field_definitions ADD COLUMN IF NOT EXISTS display_order integer DEFAULT 0`,
+      `ALTER TABLE custom_field_definitions ADD COLUMN IF NOT EXISTS is_visible boolean DEFAULT true`,
+      `ALTER TABLE custom_field_definitions ADD COLUMN IF NOT EXISTS industry text`,
+      `ALTER TABLE custom_field_definitions ADD COLUMN IF NOT EXISTS module text`,
+      `CREATE INDEX IF NOT EXISTS products_custom_attr_gin ON products USING gin (custom_attributes)`,
+      `CREATE INDEX IF NOT EXISTS customers_custom_attr_gin ON customers USING gin (custom_attributes)`,
+      `CREATE INDEX IF NOT EXISTS suppliers_custom_attr_gin ON suppliers USING gin (custom_attributes)`,
+      `CREATE INDEX IF NOT EXISTS employees_custom_attr_gin ON employees USING gin (custom_attributes)`,
+      `CREATE TABLE IF NOT EXISTS column_configurations (id text PRIMARY KEY, company_id text NOT NULL, user_id text, entity_type text NOT NULL, columns_json jsonb DEFAULT '[]'::jsonb, updated_at timestamp DEFAULT now())`,
+      `CREATE INDEX IF NOT EXISTS col_config_lookup_idx ON column_configurations (company_id, entity_type, user_id)`
     ];
 
     for (const stmt of migrationStatements) {
@@ -160,9 +178,9 @@ export async function getCompanyById(id: string) {
   }
 }
 
-export async function saveCompany(data: { id?: string; name: string; taxNumber?: string; phone?: string; address?: string; currency?: string; vatPercentage?: number | string }) {
+export async function saveCompany(data: { id?: string; name: string; taxNumber?: string; phone?: string; address?: string; currency?: string; vatPercentage?: number | string; isActive?: boolean; enableEmployeeCards?: boolean }) {
   const id = data.id || `comp_${Date.now()}`;
-  const payload = {
+  const payload: any = {
     id,
     name: data.name,
     taxNumber: data.taxNumber || '',
@@ -171,6 +189,9 @@ export async function saveCompany(data: { id?: string; name: string; taxNumber?:
     currency: data.currency || 'SAR',
     vatPercentage: (data.vatPercentage !== undefined ? String(data.vatPercentage) : '15')
   };
+  
+  if (data.isActive !== undefined) payload.isActive = data.isActive;
+  if (data.enableEmployeeCards !== undefined) payload.enableEmployeeCards = data.enableEmployeeCards;
 
   await db.insert(companies).values(payload).onConflictDoUpdate({
     target: companies.id,
@@ -201,7 +222,6 @@ export async function saveBranch(data: { id?: string; companyId: string; name: s
     address: data.address || '',
     isMain: data.isMain ?? false
   };
-
   await db.insert(branches).values(payload).onConflictDoUpdate({
     target: branches.id,
     set: payload
@@ -390,7 +410,6 @@ export async function saveCategory(data: { id?: string; companyId: string; name:
     name: data.name,
     description: data.description || ''
   };
-
   await db.insert(categories).values(payload).onConflictDoUpdate({
     target: categories.id,
     set: payload
@@ -401,6 +420,10 @@ export async function saveCategory(data: { id?: string; companyId: string; name:
 export async function deleteCategory(id: string, companyId: string) {
   const cId = requireTenant(companyId);
   await db.delete(categories).where(and(eq(categories.id, id), eq(categories.companyId, cId)));
+}
+
+export async function deleteCompany(id: string) {
+  await db.delete(companies).where(eq(companies.id, id));
 }
 
 export async function getProducts(companyId: string) {
@@ -426,9 +449,10 @@ export async function getProducts(companyId: string) {
 export async function saveProduct(data: { 
   id?: string; companyId: string; sku?: string; barcode?: string; name: string; 
   price: number; wholesalePrice?: number; halfWholesalePrice?: number; minPrice?: number; costPrice?: number; stock: number; minStock?: number; 
-  categoryId?: string; brandId?: string; unitId?: string; isWeighted?: boolean;
+  categoryId?: string; brandId?: string; unitId?: string; isWeighted?: boolean; customAttributes?: any;
 }) {
   const cId = requireTenant(data.companyId);
+  const sanitizedAttrs = await validateAndSanitizeCustomAttributes(cId, 'PRODUCT', data.customAttributes);
   const id = data.id || `prod_${Date.now()}`;
   const payload = {
     id,
@@ -446,9 +470,9 @@ export async function saveProduct(data: {
     categoryId: data.categoryId || '',
     brandId: data.brandId || '',
     unitId: data.unitId || '',
-    isWeighted: data.isWeighted ?? false
+    isWeighted: data.isWeighted ?? false,
+    customAttributes: sanitizedAttrs
   };
-
   await db.insert(products).values(payload).onConflictDoUpdate({
     target: products.id,
     set: payload
@@ -459,6 +483,94 @@ export async function saveProduct(data: {
 export async function deleteProduct(id: string, companyId: string) {
   const cId = requireTenant(companyId);
   await db.delete(products).where(and(eq(products.id, id), eq(products.companyId, cId)));
+}
+
+export async function getProductsBelowReorderPoint(companyId: string) {
+  const cId = requireTenant(companyId);
+  try {
+    // stock and minStock are stored as numeric strings in DB, we need to cast them to numeric in SQL
+    return await db.select().from(products).where(
+      and(
+        eq(products.companyId, cId),
+        sql`CAST(${products.stock} AS numeric) <= CAST(${products.minStock} AS numeric)`
+      )
+    );
+  } catch (err) {
+    console.error('getProductsBelowReorderPoint error:', err);
+    return [];
+  }
+}
+
+export async function generateSmartPurchaseOrder(companyId: string, userId: string) {
+  const cId = requireTenant(companyId);
+  const productsBelow = await getProductsBelowReorderPoint(cId);
+  if (productsBelow.length === 0) return { success: false, message: 'No products below reorder point' };
+
+  // Prepare data for AI
+  const aiData = productsBelow.map(p => ({
+    name: p.name,
+    currentStock: Number(p.stock),
+    minStock: Number(p.minStock),
+    recentSales: [] // In a real scenario, fetch recent sales movements here
+  }));
+
+  const prompt = `Based on these products below reorder point, suggest reorder quantities: ${JSON.stringify(aiData)}. Format: JSON { "suggestions": [{ "productId": string, "quantity": number, "reasoning": string }] }`;
+  const aiResponse = await analyzeWithAI(prompt);
+  const suggestions = JSON.parse(aiResponse.replace(/```json/g, "").replace(/```/g, "")).suggestions;
+
+  // Create Purchase Order
+  return await db.transaction(async (tx) => {
+    const purchaseId = `purch_${Date.now()}`;
+    const pNum = `PUR-AUTO-${Date.now().toString().slice(-6)}`;
+    
+    // For simplicity, total calculation based on costPrice
+    let total = 0;
+    const items = [];
+    
+    for (const s of suggestions) {
+        const prod = productsBelow.find(p => p.id === s.productId);
+        if(!prod) continue;
+        
+        const costPrice = Number(prod.costPrice || 0);
+        const itemTotal = s.quantity * costPrice;
+        total += itemTotal;
+        items.push({
+            productId: s.productId,
+            productName: prod.name,
+            quantity: s.quantity,
+            costPrice: costPrice,
+            total: itemTotal
+        });
+    }
+
+    await tx.insert(purchases).values({
+      id: purchaseId,
+      companyId: cId,
+      purchaseNumber: pNum,
+      total: String(total),
+      subtotal: String(total),
+      vatAmount: '0',
+      paymentMethod: 'credit',
+      supplierId: '', // Should be determined by AI or default
+      supplierName: 'AI Suggested Supplier'
+    });
+
+    for(const item of items) {
+        await tx.insert(purchaseItems).values({
+            id: `pitem_${Date.now()}_${Math.random()}`,
+            purchaseId: purchaseId,
+            companyId: cId,
+            ...item,
+            quantity: String(item.quantity),
+            costPrice: String(item.costPrice),
+            total: String(item.total)
+        });
+        
+        // update stock automatically if needed based on requirement
+    }
+
+    return { success: true, purchaseId, suggestions };
+  });
 }
 
 // ----------------------------------------------------
@@ -1063,8 +1175,9 @@ export async function getCustomerDebt(companyId: string, customerId: string): Pr
   return debt;
 }
 
-export async function saveCustomer(data: { id?: string; companyId: string; name: string; phone?: string; email?: string; balance?: number; creditLimit?: number }) {
+export async function saveCustomer(data: { id?: string; companyId: string; name: string; phone?: string; email?: string; priceLevel?: string; balance?: number; creditLimit?: number; customAttributes?: any }) {
   const cId = requireTenant(data.companyId);
+  const sanitizedAttrs = await validateAndSanitizeCustomAttributes(cId, 'CUSTOMER', data.customAttributes);
   const id = data.id || `cust_${Date.now()}`;
   const payload = {
     id,
@@ -1072,10 +1185,11 @@ export async function saveCustomer(data: { id?: string; companyId: string; name:
     name: data.name,
     phone: data.phone || '',
     email: data.email || '',
+    priceLevel: data.priceLevel || 'RETAIL',
     balance: String(data.balance || 0),
-    creditLimit: String(data.creditLimit || 0)
+    creditLimit: String(data.creditLimit || 0),
+    customAttributes: sanitizedAttrs
   };
-
   await db.insert(customers).values(payload).onConflictDoUpdate({
     target: customers.id,
     set: payload
@@ -1114,8 +1228,9 @@ export async function getSuppliers(companyId: string) {
   }
 }
 
-export async function saveSupplier(data: { id?: string; companyId: string; name: string; phone?: string; email?: string; companyName?: string; balance?: number }) {
+export async function saveSupplier(data: { id?: string; companyId: string; name: string; phone?: string; email?: string; companyName?: string; balance?: number; customAttributes?: any }) {
   const cId = requireTenant(data.companyId);
+  const sanitizedAttrs = await validateAndSanitizeCustomAttributes(cId, 'SUPPLIER', data.customAttributes);
   const id = data.id || `supp_${Date.now()}`;
   const payload = {
     id,
@@ -1124,9 +1239,9 @@ export async function saveSupplier(data: { id?: string; companyId: string; name:
     phone: data.phone || '',
     email: data.email || '',
     companyName: data.companyName || '',
-    balance: String(data.balance || 0)
+    balance: String(data.balance || 0),
+    customAttributes: sanitizedAttrs
   };
-
   await db.insert(suppliers).values(payload).onConflictDoUpdate({
     target: suppliers.id,
     set: payload
@@ -1873,8 +1988,9 @@ export async function getEmployees(companyId: string) {
 
 export async function createEmployee(companyId: string, data: any) {
   const cId = requireTenant(companyId);
+  const sanitizedAttrs = await validateAndSanitizeCustomAttributes(cId, 'EMPLOYEE', data.customAttributes);
   const id = `emp_${Date.now()}`;
-  await db.insert(employees).values({ ...data, id, companyId: cId });
+  await db.insert(employees).values({ ...data, id, companyId: cId, customAttributes: sanitizedAttrs });
   return id;
 }
 
@@ -1975,29 +2091,82 @@ export async function getCompanyModuleOverrides(companyId: string) {
 
 export async function setCompanyModuleOverride(companyId: string, moduleName: string, isEnabled: boolean, updatedBy: string) {
   const cId = requireTenant(companyId);
+  
   // Module Dependencies Validation
   const dependencies: Record<string, string[]> = {
     'POS': ['SALES', 'INVENTORY'],
     'SALES': ['INVENTORY'],
-    'PURCHASES': ['INVENTORY']
+    'PURCHASES': ['INVENTORY'],
+    'AI': ['SALES', 'INVENTORY', 'ACCOUNTING']
   };
 
   const existingConfig = await getCompanyModuleOverrides(cId);
-  const enabledModules = new Set(existingConfig.filter(m => m.isEnabled).map(m => m.moduleName));
   
-  if (isEnabled) {
-    // Check if dependencies are met
-    const deps = dependencies[moduleName] || [];
-    for (const dep of deps) {
-      if (!enabledModules.has(dep)) {
-        throw new Error(`Cannot enable ${moduleName}. Missing dependency: ${dep}`);
-      }
+  // Industry definitions (Phase 3)
+  const INDUSTRY_DEFAULTS: Record<string, string[]> = {
+    'RETAIL': ['POS', 'SALES', 'INVENTORY', 'ACCOUNTING'],
+    'FOOD': ['POS', 'SALES', 'INVENTORY', 'ACCOUNTING', 'BATCHES'],
+    'CLOTHING': ['POS', 'SALES', 'INVENTORY', 'ACCOUNTING', 'VARIANTS'],
+    'RESTAURANT': ['POS', 'SALES', 'INVENTORY', 'ACCOUNTING', 'RESTAURANT_MODE'],
+    'AUTOMOTIVE': ['SALES', 'INVENTORY', 'ACCOUNTING', 'SERIAL_NUMBERS', 'MAINTENANCE'],
+    'CLINIC': ['SALES', 'INVENTORY', 'ACCOUNTING', 'CLINIC_MODE', 'BOOKINGS'],
+    'CONTRACTING': ['SALES', 'INVENTORY', 'ACCOUNTING', 'PROJECTS', 'PURCHASES']
+  };
+
+  const enabledModules = new Set(['ACCOUNTING']);
+  
+  // 1. Extract selected industries
+  const selectedIndustries = new Set<string>();
+  for (const mo of existingConfig) {
+    if (mo.isEnabled && mo.moduleName.startsWith('INDUSTRY:')) {
+      selectedIndustries.add(mo.moduleName.split(':')[1]);
     }
-  } else {
-    // Check if other enabled modules depend on this
-    for (const [mod, deps] of Object.entries(dependencies)) {
-      if (enabledModules.has(mod) && deps.includes(moduleName) && mod !== moduleName) {
-         throw new Error(`Cannot disable ${moduleName}. It is required by active module: ${mod}`);
+  }
+
+  // 2. If we are enabling/disabling an industry right now, apply it temporarily for validation
+  if (moduleName.startsWith('INDUSTRY:')) {
+    const ind = moduleName.split(':')[1];
+    if (isEnabled) selectedIndustries.add(ind);
+    else selectedIndustries.delete(ind);
+  }
+
+  // 3. Apply industry defaults
+  for (const industry of selectedIndustries) {
+    const mods = INDUSTRY_DEFAULTS[industry] || [];
+    for (const mod of mods) {
+      enabledModules.add(mod);
+    }
+  }
+
+  // 4. Apply existing module overrides
+  for (const mo of existingConfig) {
+    if (!mo.moduleName.startsWith('INDUSTRY:')) {
+      if (mo.isEnabled) enabledModules.add(mo.moduleName);
+      else enabledModules.delete(mo.moduleName);
+    }
+  }
+
+  // 5. Apply the requested override if it's not an industry
+  if (!moduleName.startsWith('INDUSTRY:')) {
+      if (isEnabled) enabledModules.add(moduleName);
+      else enabledModules.delete(moduleName);
+  }
+  
+  if (!moduleName.startsWith('INDUSTRY:')) {
+    if (isEnabled) {
+      // Check if dependencies are met
+      const deps = dependencies[moduleName] || [];
+      for (const dep of deps) {
+        if (!enabledModules.has(dep)) {
+          throw new Error(`Cannot enable ${moduleName}. Missing dependency: ${dep}`);
+        }
+      }
+    } else {
+      // Check if other enabled modules depend on this
+      for (const [mod, deps] of Object.entries(dependencies)) {
+        if (enabledModules.has(mod) && deps.includes(moduleName) && mod !== moduleName) {
+           throw new Error(`Cannot disable ${moduleName}. It is required by active module: ${mod}`);
+        }
       }
     }
   }
@@ -2043,25 +2212,473 @@ export async function setBranchModuleOverride(branchId: string, moduleName: stri
 
 export async function getCustomFieldDefinitions(companyId: string, entityType?: string) {
   const cId = requireTenant(companyId);
+  const pool = createPool();
+  let query = "SELECT id, company_id as \"companyId\", entity_type as \"entityType\", field_key as \"fieldKey\", label, data_type as \"dataType\", is_required as \"isRequired\", options_json as \"optionsJson\" FROM custom_field_definitions WHERE company_id = $1 AND field_key NOT LIKE '__COL_CFG_%' AND entity_type NOT LIKE '%_CONFIG'";
+  const params: any[] = [cId];
   if (entityType) {
-    return await db.select().from(customFieldDefinitions)
-      .where(and(eq(customFieldDefinitions.companyId, cId), eq(customFieldDefinitions.entityType, entityType)));
+    query += ' AND entity_type = $2';
+    params.push(entityType);
   }
-  return await db.select().from(customFieldDefinitions).where(eq(customFieldDefinitions.companyId, cId));
+  const res = await pool.query(query, params);
+  return res.rows;
+}
+
+async function ensureCompanyExists(companyId: string) {
+  if (!companyId) return;
+  try {
+    const pool = createPool();
+    await pool.query(
+      `INSERT INTO companies (id, name)
+       VALUES ($1, $1)
+       ON CONFLICT (id) DO NOTHING`,
+      [companyId]
+    );
+  } catch (err) {
+    // Ignore error
+  }
 }
 
 export async function createCustomFieldDefinition(companyId: string, data: any) {
   const cId = requireTenant(companyId);
-  await db.insert(customFieldDefinitions).values({
-    id: `cfd_${Date.now()}_${Math.random().toString(36).substring(7)}`,
+  await ensureCompanyExists(cId);
+  const id = data.id || `cfd_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+  const pool = createPool();
+  const options = data.optionsJson || data.options || [];
+  await pool.query(
+    `INSERT INTO custom_field_definitions (id, company_id, entity_type, field_key, label, data_type, is_required, options_json)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, options_json = EXCLUDED.options_json`,
+    [id, cId, data.entityType, data.fieldKey, data.label, data.dataType, data.isRequired || false, JSON.stringify(options)]
+  );
+  return id;
+}
+
+
+export async function validateAndSanitizeCustomAttributes(companyId: string, entityType: string, customAttrs: any) {
+  const definitions = await getCustomFieldDefinitions(companyId, entityType);
+  const sanitized: Record<string, any> = {};
+  const attrs = customAttrs || {};
+
+  for (const def of definitions) {
+    const val = attrs[def.fieldKey] !== undefined ? attrs[def.fieldKey] : def.defaultValue;
+    
+    if (def.isRequired && (val === undefined || val === null || val === '' || (Array.isArray(val) && val.length === 0))) {
+      throw new Error(`الحقل الإلزامي "${def.label}" (${def.fieldKey}) مفقود.`);
+    }
+
+    if (val !== undefined && val !== null && val !== '') {
+      if (def.dataType === 'NUMBER') {
+        const num = Number(val);
+        if (isNaN(num)) throw new Error(`الحقل "${def.label}" يجب أن يكون رقماً.`);
+        sanitized[def.fieldKey] = num;
+      } else if (def.dataType === 'BOOLEAN') {
+        sanitized[def.fieldKey] = Boolean(val);
+      } else if (def.dataType === 'SELECT') {
+        const opts = (def.optionsJson as string[]) || [];
+        if (opts.length > 0 && !opts.includes(String(val))) {
+          throw new Error(`القيمة "${val}" غير صالحة للحقل "${def.label}".`);
+        }
+        sanitized[def.fieldKey] = val;
+      } else if (def.dataType === 'MULTI_SELECT') {
+        const opts = (def.optionsJson as string[]) || [];
+        const arr = Array.isArray(val) ? val : [val];
+        for (const v of arr) {
+          if (opts.length > 0 && !opts.includes(String(v))) {
+            throw new Error(`القيمة "${v}" غير صالحة للحقل "${def.label}".`);
+          }
+        }
+        sanitized[def.fieldKey] = arr;
+      } else {
+        sanitized[def.fieldKey] = String(val);
+      }
+    }
+  }
+
+  // Historical Safety: preserve unlisted attributes
+  for (const key of Object.keys(attrs)) {
+    if (sanitized[key] === undefined) {
+      sanitized[key] = attrs[key];
+    }
+  }
+
+  return sanitized;
+}
+
+export async function deleteCustomFieldDefinition(id: string, companyId: string) {
+  const cId = requireTenant(companyId);
+  const pool = createPool();
+  await pool.query('DELETE FROM custom_field_definitions WHERE id = $1 AND company_id = $2', [id, cId]);
+  return true;
+}
+
+// ----------------------------------------------------
+// DYNAMIC REPORTING & COLUMN MANAGER ENGINE (PHASE 4.5)
+// ----------------------------------------------------
+
+function normalizeEntityType(entityType: string): 'PRODUCT' | 'CUSTOMER' | 'SUPPLIER' | 'EMPLOYEE' {
+  const norm = (entityType || '').toUpperCase().trim();
+  if (norm.startsWith('PROD')) return 'PRODUCT';
+  if (norm.startsWith('CUST')) return 'CUSTOMER';
+  if (norm.startsWith('SUPP')) return 'SUPPLIER';
+  if (norm.startsWith('EMP')) return 'EMPLOYEE';
+  return 'PRODUCT';
+}
+
+const CORE_COLUMNS_MAP: Record<string, Array<{ fieldKey: string; label: string; dataType: string; isCustom: boolean; visible: boolean; order: number }>> = {
+  PRODUCT: [
+    { fieldKey: 'name', label: 'اسم المنتج', dataType: 'TEXT', isCustom: false, visible: true, order: 1 },
+    { fieldKey: 'sku', label: 'الرمز (SKU)', dataType: 'TEXT', isCustom: false, visible: true, order: 2 },
+    { fieldKey: 'barcode', label: 'الباركود', dataType: 'TEXT', isCustom: false, visible: true, order: 3 },
+    { fieldKey: 'price', label: 'السعر', dataType: 'NUMBER', isCustom: false, visible: true, order: 4 },
+    { fieldKey: 'costPrice', label: 'التكلفة', dataType: 'NUMBER', isCustom: false, visible: true, order: 5 },
+    { fieldKey: 'stock', label: 'المخزون', dataType: 'NUMBER', isCustom: false, visible: true, order: 6 },
+    { fieldKey: 'minStock', label: 'حد أدنى المخزون', dataType: 'NUMBER', isCustom: false, visible: true, order: 7 },
+    { fieldKey: 'isActive', label: 'نشط', dataType: 'BOOLEAN', isCustom: false, visible: true, order: 8 },
+    { fieldKey: 'createdAt', label: 'تاريخ الإنشاء', dataType: 'DATE', isCustom: false, visible: true, order: 9 }
+  ],
+  CUSTOMER: [
+    { fieldKey: 'name', label: 'اسم العميل', dataType: 'TEXT', isCustom: false, visible: true, order: 1 },
+    { fieldKey: 'phone', label: 'الهاتف', dataType: 'TEXT', isCustom: false, visible: true, order: 2 },
+    { fieldKey: 'email', label: 'البريد الإلكتروني', dataType: 'TEXT', isCustom: false, visible: true, order: 3 },
+    { fieldKey: 'priceLevel', label: 'مستوى السعر', dataType: 'TEXT', isCustom: false, visible: true, order: 4 },
+    { fieldKey: 'balance', label: 'الرصيد', dataType: 'NUMBER', isCustom: false, visible: true, order: 5 },
+    { fieldKey: 'creditLimit', label: 'الحد الائتماني', dataType: 'NUMBER', isCustom: false, visible: true, order: 6 },
+    { fieldKey: 'isActive', label: 'نشط', dataType: 'BOOLEAN', isCustom: false, visible: true, order: 7 },
+    { fieldKey: 'createdAt', label: 'تاريخ التسجيل', dataType: 'DATE', isCustom: false, visible: true, order: 8 }
+  ],
+  SUPPLIER: [
+    { fieldKey: 'name', label: 'اسم المورد', dataType: 'TEXT', isCustom: false, visible: true, order: 1 },
+    { fieldKey: 'companyName', label: 'اسم الشركة', dataType: 'TEXT', isCustom: false, visible: true, order: 2 },
+    { fieldKey: 'phone', label: 'الهاتف', dataType: 'TEXT', isCustom: false, visible: true, order: 3 },
+    { fieldKey: 'email', label: 'البريد الإلكتروني', dataType: 'TEXT', isCustom: false, visible: true, order: 4 },
+    { fieldKey: 'balance', label: 'الرصيد', dataType: 'NUMBER', isCustom: false, visible: true, order: 5 },
+    { fieldKey: 'isActive', label: 'نشط', dataType: 'BOOLEAN', isCustom: false, visible: true, order: 6 },
+    { fieldKey: 'createdAt', label: 'تاريخ التسجيل', dataType: 'DATE', isCustom: false, visible: true, order: 7 }
+  ],
+  EMPLOYEE: [
+    { fieldKey: 'name', label: 'اسم الموظف', dataType: 'TEXT', isCustom: false, visible: true, order: 1 },
+    { fieldKey: 'code', label: 'كود الموظف', dataType: 'TEXT', isCustom: false, visible: true, order: 2 },
+    { fieldKey: 'position', label: 'المنصب', dataType: 'TEXT', isCustom: false, visible: true, order: 3 },
+    { fieldKey: 'department', label: 'القسم', dataType: 'TEXT', isCustom: false, visible: true, order: 4 },
+    { fieldKey: 'salary', label: 'الراتب الأساسي', dataType: 'NUMBER', isCustom: false, visible: true, order: 5 },
+    { fieldKey: 'status', label: 'الحالة', dataType: 'TEXT', isCustom: false, visible: true, order: 6 },
+    { fieldKey: 'joiningDate', label: 'تاريخ الانضمام', dataType: 'DATE', isCustom: false, visible: true, order: 7 },
+    { fieldKey: 'createdAt', label: 'تاريخ التسجيل', dataType: 'DATE', isCustom: false, visible: true, order: 8 }
+  ]
+};
+
+export async function getColumnConfiguration(companyId: string, entityTypeInput: string, userId?: string) {
+  const cId = requireTenant(companyId);
+  const entityType = normalizeEntityType(entityTypeInput);
+  const pool = createPool();
+
+  const customDefs = await getCustomFieldDefinitions(cId, entityType);
+
+  let savedCols: any[] = [];
+  const cfgKeyUser = `__COL_CFG_${userId || 'DEFAULT'}`;
+  const cfgKeyDefault = '__COL_CFG_DEFAULT';
+  const cfgEntityType = `${entityType}_CONFIG`;
+
+  if (userId) {
+    const res = await pool.query(
+      'SELECT options_json FROM custom_field_definitions WHERE company_id = $1 AND entity_type = $2 AND field_key = $3 LIMIT 1',
+      [cId, cfgEntityType, cfgKeyUser]
+    );
+    if (res.rows.length > 0) {
+      savedCols = res.rows[0].options_json || [];
+    }
+  }
+
+  if (savedCols.length === 0) {
+    const resDef = await pool.query(
+      'SELECT options_json FROM custom_field_definitions WHERE company_id = $1 AND entity_type = $2 AND field_key = $3 LIMIT 1',
+      [cId, cfgEntityType, cfgKeyDefault]
+    );
+    if (resDef.rows.length > 0) {
+      savedCols = resDef.rows[0].options_json || [];
+    }
+  }
+
+  const defaultCore = CORE_COLUMNS_MAP[entityType] || [];
+  let mergedColumns: any[] = [];
+
+  if (Array.isArray(savedCols) && savedCols.length > 0) {
+    const existingKeys = new Set(savedCols.map((c: any) => c.fieldKey));
+    mergedColumns = [...savedCols];
+
+    defaultCore.forEach(coreCol => {
+      if (!existingKeys.has(coreCol.fieldKey)) {
+        mergedColumns.push({ ...coreCol, order: mergedColumns.length + 1 });
+      }
+    });
+
+    customDefs.forEach(def => {
+      if (!existingKeys.has(def.fieldKey)) {
+        mergedColumns.push({
+          fieldKey: def.fieldKey,
+          label: def.label,
+          dataType: def.dataType,
+          isCustom: true,
+          visible: true,
+          order: mergedColumns.length + 1
+        });
+      }
+    });
+  } else {
+    mergedColumns = defaultCore.map((col, idx) => ({ ...col, order: idx + 1 }));
+    customDefs.forEach(def => {
+      mergedColumns.push({
+        fieldKey: def.fieldKey,
+        label: def.label,
+        dataType: def.dataType,
+        isCustom: true,
+        visible: true,
+        order: mergedColumns.length + 1
+      });
+    });
+  }
+
+  return {
     companyId: cId,
-    entityType: data.entityType,
-    fieldKey: data.fieldKey,
-    label: data.label,
-    dataType: data.dataType,
-    isRequired: data.isRequired || false,
-    optionsJson: data.optionsJson || []
+    entityType,
+    columns: mergedColumns
+  };
+}
+
+export async function saveColumnConfiguration(companyId: string, entityTypeInput: string, userId: string | null, columns: any[]) {
+  const cId = requireTenant(companyId);
+  await ensureCompanyExists(cId);
+  const entityType = normalizeEntityType(entityTypeInput);
+  const pool = createPool();
+  const targetUserId = userId && userId.trim() !== '' ? userId.trim() : 'DEFAULT';
+  const configId = `colcfg_${cId}_${targetUserId}_${entityType}`;
+  const cfgEntityType = `${entityType}_CONFIG`;
+  const cfgFieldKey = `__COL_CFG_${targetUserId}`;
+
+  await pool.query(
+    `INSERT INTO custom_field_definitions (id, company_id, entity_type, field_key, label, data_type, options_json)
+     VALUES ($1, $2, $3, $4, $5, 'JSON', $6)
+     ON CONFLICT (id) DO UPDATE SET options_json = EXCLUDED.options_json`,
+    [configId, cId, cfgEntityType, cfgFieldKey, targetUserId, JSON.stringify(columns || [])]
+  );
+
+  return configId;
+}
+
+export async function getDynamicReport(companyId: string, entityTypeInput: string, options: {
+  filters?: Record<string, any>;
+  search?: string;
+  sortBy?: string;
+  sortOrder?: string;
+  page?: number;
+  limit?: number;
+  userId?: string;
+}) {
+  const cId = requireTenant(companyId);
+  const entityType = normalizeEntityType(entityTypeInput);
+  const pool = createPool();
+
+  const columnConfig = await getColumnConfiguration(cId, entityType, options.userId);
+  const allColumns = columnConfig.columns || [];
+
+  let tableName = 'products';
+  if (entityType === 'CUSTOMER') tableName = 'customers';
+  if (entityType === 'SUPPLIER') tableName = 'suppliers';
+  if (entityType === 'EMPLOYEE') tableName = 'employees';
+
+  const DB_COL_MAP: Record<string, string> = {
+    name: 'name',
+    sku: 'sku',
+    barcode: 'barcode',
+    price: 'price',
+    wholesalePrice: 'wholesale_price',
+    costPrice: 'cost_price',
+    stock: 'stock',
+    minStock: 'min_stock',
+    isActive: 'is_active',
+    createdAt: 'created_at',
+    phone: 'phone',
+    email: 'email',
+    priceLevel: 'price_level',
+    balance: 'balance',
+    creditLimit: 'credit_limit',
+    companyName: 'company_name',
+    code: 'code',
+    position: 'position',
+    department: 'department',
+    salary: 'salary',
+    status: 'status',
+    joiningDate: 'joining_date'
+  };
+
+  const params: any[] = [cId];
+  const whereClauses: string[] = ['company_id = $1'];
+
+  if (options.search && options.search.trim() !== '') {
+    params.push(`%${options.search.trim()}%`);
+    const pIdx = params.length;
+    whereClauses.push(`(name ILIKE $${pIdx} OR custom_attributes::text ILIKE $${pIdx})`);
+  }
+
+  const customDefs = await getCustomFieldDefinitions(cId, entityType);
+  const customDefMap = new Map<string, any>();
+  customDefs.forEach((d: any) => customDefMap.set(d.fieldKey, d));
+
+  const filters = options.filters || {};
+  for (const [key, rawVal] of Object.entries(filters)) {
+    if (rawVal === undefined || rawVal === null || rawVal === '') continue;
+
+    const cleanKey = key.replace(/[^a-zA-Z0-9_]/g, '');
+    let colDef = allColumns.find((c: any) => c.fieldKey === key);
+    if (customDefMap.has(key)) {
+      const cDef = customDefMap.get(key);
+      colDef = { ...colDef, isCustom: true, dataType: cDef.dataType, fieldKey: key };
+    }
+
+    if (colDef && colDef.isCustom) {
+      const dataType = colDef.dataType;
+      if (dataType === 'NUMBER') {
+        if (typeof rawVal === 'object' && rawVal !== null && (rawVal.min !== undefined || rawVal.max !== undefined)) {
+          if (rawVal.min !== undefined && rawVal.min !== '') {
+            params.push(Number(rawVal.min));
+            whereClauses.push(`(NULLIF(custom_attributes->>'${cleanKey}', '')::numeric) >= $${params.length}`);
+          }
+          if (rawVal.max !== undefined && rawVal.max !== '') {
+            params.push(Number(rawVal.max));
+            whereClauses.push(`(NULLIF(custom_attributes->>'${cleanKey}', '')::numeric) <= $${params.length}`);
+          }
+        } else {
+          params.push(Number(rawVal));
+          whereClauses.push(`(NULLIF(custom_attributes->>'${cleanKey}', '')::numeric) = $${params.length}`);
+        }
+      } else if (dataType === 'BOOLEAN') {
+        params.push(Boolean(rawVal));
+        whereClauses.push(`(custom_attributes->>'${cleanKey}')::boolean = $${params.length}`);
+      } else if (dataType === 'DATE') {
+        if (typeof rawVal === 'object' && rawVal !== null && (rawVal.from || rawVal.to)) {
+          if (rawVal.from) {
+            params.push(String(rawVal.from));
+            whereClauses.push(`custom_attributes->>'${cleanKey}' >= $${params.length}`);
+          }
+          if (rawVal.to) {
+            params.push(String(rawVal.to));
+            whereClauses.push(`custom_attributes->>'${cleanKey}' <= $${params.length}`);
+          }
+        } else {
+          params.push(`%${rawVal}%`);
+          whereClauses.push(`custom_attributes->>'${cleanKey}' ILIKE $${params.length}`);
+        }
+      } else {
+        params.push(`%${rawVal}%`);
+        whereClauses.push(`custom_attributes->>'${cleanKey}' ILIKE $${params.length}`);
+      }
+    } else if (DB_COL_MAP[key]) {
+      const dbCol = DB_COL_MAP[key];
+      if (typeof rawVal === 'boolean') {
+        params.push(rawVal);
+        whereClauses.push(`${dbCol} = $${params.length}`);
+      } else if (typeof rawVal === 'number') {
+        params.push(rawVal);
+        whereClauses.push(`${dbCol} = $${params.length}`);
+      } else {
+        params.push(`%${rawVal}%`);
+        whereClauses.push(`${dbCol} ILIKE $${params.length}`);
+      }
+    } else {
+      // Historical or unmapped custom field fallback:
+      if (typeof rawVal === 'object' && rawVal !== null) {
+        if (rawVal.min !== undefined || rawVal.max !== undefined) {
+          if (rawVal.min !== undefined && rawVal.min !== '') {
+            params.push(Number(rawVal.min));
+            whereClauses.push(`(NULLIF(custom_attributes->>'${cleanKey}', '')::numeric) >= $${params.length}`);
+          }
+          if (rawVal.max !== undefined && rawVal.max !== '') {
+            params.push(Number(rawVal.max));
+            whereClauses.push(`(NULLIF(custom_attributes->>'${cleanKey}', '')::numeric) <= $${params.length}`);
+          }
+        } else if (rawVal.from || rawVal.to) {
+          if (rawVal.from) {
+            params.push(String(rawVal.from));
+            whereClauses.push(`custom_attributes->>'${cleanKey}' >= $${params.length}`);
+          }
+          if (rawVal.to) {
+            params.push(String(rawVal.to));
+            whereClauses.push(`custom_attributes->>'${cleanKey}' <= $${params.length}`);
+          }
+        } else {
+          params.push(`%${JSON.stringify(rawVal)}%`);
+          whereClauses.push(`custom_attributes->>'${cleanKey}' ILIKE $${params.length}`);
+        }
+      } else {
+        params.push(`%${rawVal}%`);
+        whereClauses.push(`custom_attributes->>'${cleanKey}' ILIKE $${params.length}`);
+      }
+    }
+  }
+
+  let orderClause = 'ORDER BY created_at DESC';
+  if (options.sortBy) {
+    const sortKey = options.sortBy;
+    const orderDir = (options.sortOrder || 'asc').toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    const colDef = allColumns.find((c: any) => c.fieldKey === sortKey);
+    const cleanKey = sortKey.replace(/[^a-zA-Z0-9_]/g, '');
+
+    if (colDef && colDef.isCustom) {
+      if (colDef.dataType === 'NUMBER') {
+        orderClause = `ORDER BY (custom_attributes->>'${cleanKey}')::numeric ${orderDir} NULLS LAST`;
+      } else if (colDef.dataType === 'DATE') {
+        orderClause = `ORDER BY (custom_attributes->>'${cleanKey}')::timestamp ${orderDir} NULLS LAST`;
+      } else {
+        orderClause = `ORDER BY custom_attributes->>'${cleanKey}' ${orderDir} NULLS LAST`;
+      }
+    } else if (DB_COL_MAP[sortKey]) {
+      const dbCol = DB_COL_MAP[sortKey];
+      orderClause = `ORDER BY ${dbCol} ${orderDir}`;
+    } else {
+      orderClause = `ORDER BY custom_attributes->>'${cleanKey}' ${orderDir} NULLS LAST`;
+    }
+  }
+
+  const page = Math.max(1, options.page || 1);
+  const limit = Math.max(1, Math.min(1000, options.limit || 100));
+  const offset = (page - 1) * limit;
+
+  const whereStr = whereClauses.join(' AND ');
+
+  const countQuery = `SELECT COUNT(*)::int as count FROM ${tableName} WHERE ${whereStr}`;
+  const countRes = await pool.query(countQuery, params);
+  const totalCount = countRes.rows[0]?.count || 0;
+
+  const dataQuery = `SELECT * FROM ${tableName} WHERE ${whereStr} ${orderClause} LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+  const dataRes = await pool.query(dataQuery, [...params, limit, offset]);
+
+  const rows = dataRes.rows.map(row => {
+    const formatted: any = { ...row };
+    if (formatted.price !== undefined) formatted.price = Number(formatted.price || 0);
+    if (formatted.wholesale_price !== undefined) formatted.wholesalePrice = Number(formatted.wholesale_price || 0);
+    if (formatted.cost_price !== undefined) formatted.costPrice = Number(formatted.cost_price || 0);
+    if (formatted.stock !== undefined) formatted.stock = Number(formatted.stock || 0);
+    if (formatted.balance !== undefined) formatted.balance = Number(formatted.balance || 0);
+    if (formatted.credit_limit !== undefined) formatted.creditLimit = Number(formatted.credit_limit || 0);
+    if (formatted.salary !== undefined) formatted.salary = Number(formatted.salary || 0);
+    if (formatted.custom_attributes) {
+      formatted.customAttributes = formatted.custom_attributes;
+    } else {
+      formatted.customAttributes = {};
+    }
+    return formatted;
   });
+
+  return {
+    success: true,
+    companyId: cId,
+    entityType,
+    page,
+    limit,
+    totalCount,
+    columns: allColumns,
+    data: rows
+  };
 }
 
 // END_OF_REPOSITORY_FUNCTIONS
@@ -2151,4 +2768,505 @@ export async function getPriceForCustomer(productId: string, customerId: string,
   const prod = await db.select().from(products).where(and(eq(products.id, productId), eq(products.companyId, cId))).limit(1);
   return prod.length > 0 ? prod[0].price : '0';
 }
+
+// ----------------------------------------------------
+// DYNAMIC WORKFLOW ENGINE MODULE
+// ----------------------------------------------------
+
+export async function getWorkflowDefinitions(companyId: string, documentType?: string) {
+  const cId = requireTenant(companyId);
+  const conditions = [eq(workflowDefinitions.companyId, cId)];
+  if (documentType) {
+    conditions.push(eq(workflowDefinitions.documentType, documentType));
+  }
+  return await db.select()
+    .from(workflowDefinitions)
+    .where(and(...conditions));
+}
+
+export async function getWorkflowDefinitionWithDetails(companyId: string, workflowId: string) {
+  const cId = requireTenant(companyId);
+  const flow = await db.select()
+    .from(workflowDefinitions)
+    .where(and(eq(workflowDefinitions.id, workflowId), eq(workflowDefinitions.companyId, cId)))
+    .limit(1);
+    
+  if (flow.length === 0) return null;
+  
+  const steps = await db.select()
+    .from(workflowSteps)
+    .where(eq(workflowSteps.workflowDefinitionId, workflowId))
+    .orderBy(workflowSteps.stepOrder);
+    
+  const transitions = await db.select()
+    .from(workflowTransitions)
+    .where(eq(workflowTransitions.workflowDefinitionId, workflowId));
+    
+  return {
+    ...flow[0],
+    steps,
+    transitions
+  };
+}
+
+export async function createWorkflowDefinition(companyId: string, data: {
+  name: string;
+  documentType: string;
+  description?: string;
+  steps: Array<{ name: string; status: string; isInitial?: boolean; isFinal?: boolean; stepOrder: number }>;
+  transitions: Array<{ name: string; fromStepName: string; toStepName: string; requiredRole?: string }>;
+}) {
+  const cId = requireTenant(companyId);
+  const workflowId = `wf_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+  
+  await db.transaction(async (tx) => {
+    // 1. Insert Workflow Definition
+    await tx.insert(workflowDefinitions).values({
+      id: workflowId,
+      companyId: cId,
+      name: data.name,
+      documentType: data.documentType,
+      description: data.description || '',
+      isActive: true,
+    });
+    
+    // 2. Insert Steps
+    const stepMap = new Map<string, string>(); // name -> id
+    for (const step of data.steps) {
+      const stepId = `wfs_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      await tx.insert(workflowSteps).values({
+        id: stepId,
+        workflowDefinitionId: workflowId,
+        name: step.name,
+        status: step.status,
+        isInitial: step.isInitial || false,
+        isFinal: step.isFinal || false,
+        stepOrder: step.stepOrder,
+      });
+      stepMap.set(step.name, stepId);
+    }
+    
+    // 3. Insert Transitions
+    for (const trans of data.transitions) {
+      const fromStepId = stepMap.get(trans.fromStepName);
+      const toStepId = stepMap.get(trans.toStepName);
+      if (!fromStepId || !toStepId) {
+        throw new Error(`Invalid transition steps: ${trans.fromStepName} -> ${trans.toStepName}`);
+      }
+      const transId = `wft_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      await tx.insert(workflowTransitions).values({
+        id: transId,
+        workflowDefinitionId: workflowId,
+        fromStepId,
+        toStepId,
+        name: trans.name,
+        requiredRole: trans.requiredRole || null,
+      });
+    }
+  });
+  
+  return workflowId;
+}
+
+export async function deleteWorkflowDefinition(companyId: string, workflowId: string) {
+  const cId = requireTenant(companyId);
+  
+  // Historical safety check: Check if any sales or purchases are currently using any step of this workflow
+  const steps = await db.select({ id: workflowSteps.id })
+    .from(workflowSteps)
+    .where(eq(workflowSteps.workflowDefinitionId, workflowId));
+    
+  if (steps.length > 0) {
+    const stepIds = steps.map(s => s.id);
+    // Check sales
+    const usedInSales = await db.select({ id: sales.id })
+      .from(sales)
+      .where(and(eq(sales.companyId, cId), sql`${sales.currentStepId} IN ${stepIds}`))
+      .limit(1);
+    // Check purchases
+    const usedInPurchases = await db.select({ id: purchases.id })
+      .from(purchases)
+      .where(and(eq(purchases.companyId, cId), sql`${purchases.currentStepId} IN ${stepIds}`))
+      .limit(1);
+      
+    if (usedInSales.length > 0 || usedInPurchases.length > 0) {
+      throw new Error('WORKFLOW_IN_USE');
+    }
+  }
+  
+  await db.delete(workflowDefinitions)
+    .where(and(eq(workflowDefinitions.id, workflowId), eq(workflowDefinitions.companyId, cId)));
+}
+
+export async function getDocumentWorkflowState(companyId: string, documentId: string, documentType: string) {
+  const cId = requireTenant(companyId);
+  let currentStepId: string | null = null;
+  let doc: any = null;
+  
+  if (documentType === 'SALES_ORDER' || documentType === 'SALES_INVOICE') {
+    const res = await db.select().from(sales).where(and(eq(sales.id, documentId), eq(sales.companyId, cId))).limit(1);
+    if (res.length > 0) {
+      doc = res[0];
+      currentStepId = res[0].currentStepId;
+    }
+  } else if (documentType === 'PURCHASE_ORDER') {
+    const res = await db.select().from(purchases).where(and(eq(purchases.id, documentId), eq(purchases.companyId, cId))).limit(1);
+    if (res.length > 0) {
+      doc = res[0];
+      currentStepId = res[0].currentStepId;
+    }
+  }
+  
+  if (!doc) return null;
+  
+  // Find matching workflow definition
+  const wfs = await db.select()
+    .from(workflowDefinitions)
+    .where(and(eq(workflowDefinitions.companyId, cId), eq(workflowDefinitions.documentType, documentType), eq(workflowDefinitions.isActive, true)))
+    .limit(1);
+    
+  if (wfs.length === 0) return null;
+  const workflow = wfs[0];
+  
+  // If no step is assigned yet, resolve the initial step
+  let currentStep: any = null;
+  if (!currentStepId) {
+    const initSteps = await db.select()
+      .from(workflowSteps)
+      .where(and(eq(workflowSteps.workflowDefinitionId, workflow.id), eq(workflowSteps.isInitial, true)))
+      .limit(1);
+    if (initSteps.length > 0) {
+      currentStep = initSteps[0];
+      // Auto-bind doc to initial step
+      if (documentType === 'SALES_ORDER' || documentType === 'SALES_INVOICE') {
+        await db.update(sales).set({ currentStepId: currentStep.id }).where(eq(sales.id, documentId));
+      } else if (documentType === 'PURCHASE_ORDER') {
+        await db.update(purchases).set({ currentStepId: currentStep.id }).where(eq(purchases.id, documentId));
+      }
+    }
+  } else {
+    const steps = await db.select()
+      .from(workflowSteps)
+      .where(eq(workflowSteps.id, currentStepId))
+      .limit(1);
+    if (steps.length > 0) {
+      currentStep = steps[0];
+    }
+  }
+  
+  if (!currentStep) return null;
+  
+  // Get available transitions from current step
+  const transitions = await db.select()
+    .from(workflowTransitions)
+    .where(and(eq(workflowTransitions.workflowDefinitionId, workflow.id), eq(workflowTransitions.fromStepId, currentStep.id)));
+    
+  // Get transitions history
+  const history = await db.select({
+    id: workflowHistory.id,
+    notes: workflowHistory.notes,
+    createdAt: workflowHistory.createdAt,
+    performedBy: workflowHistory.performedBy,
+    fromStepName: sql<string>`(select name from workflow_steps where id = ${workflowHistory.fromStepId})`,
+    toStepName: sql<string>`(select name from workflow_steps where id = ${workflowHistory.toStepId})`,
+    userName: sql<string>`(select name from users where id = ${workflowHistory.performedBy})`,
+  })
+  .from(workflowHistory)
+  .where(and(eq(workflowHistory.documentId, documentId), eq(workflowHistory.companyId, cId)))
+  .orderBy(desc(workflowHistory.createdAt));
+  
+  return {
+    documentId,
+    documentType,
+    workflow,
+    currentStep,
+    availableTransitions: transitions,
+    history
+  };
+}
+
+export async function executeWorkflowTransition(companyId: string, params: {
+  documentId: string;
+  documentType: string;
+  transitionId: string;
+  performedBy: string;
+  userRole: string;
+  notes?: string;
+}) {
+  const cId = requireTenant(companyId);
+  
+  // 1. Get current state of document
+  const state = await getDocumentWorkflowState(cId, params.documentId, params.documentType);
+  if (!state) throw new Error('DOCUMENT_NOT_FOUND_OR_NO_WORKFLOW');
+  
+  const { currentStep, availableTransitions } = state;
+  
+  // 2. Find transition
+  const trans = availableTransitions.find(t => t.id === params.transitionId);
+  if (!trans) throw new Error('INVALID_TRANSITION');
+  
+  // 3. Security Role Check (RBAC)
+  if (trans.requiredRole) {
+    const hasRole = params.userRole === 'ADMIN' || params.userRole === trans.requiredRole || (trans.requiredRole === 'MANAGER' && params.userRole === 'ADMIN');
+    if (!hasRole) {
+      throw new Error('FORBIDDEN_ROLE');
+    }
+  }
+  
+  // 4. Resolve To Step
+  const toSteps = await db.select()
+    .from(workflowSteps)
+    .where(eq(workflowSteps.id, trans.toStepId))
+    .limit(1);
+    
+  if (toSteps.length === 0) throw new Error('TARGET_STEP_NOT_FOUND');
+  const targetStep = toSteps[0];
+  
+  // 5. Execute DB Transaction
+  await db.transaction(async (tx) => {
+    // Update document step
+    if (params.documentType === 'SALES_ORDER' || params.documentType === 'SALES_INVOICE') {
+      await tx.update(sales)
+        .set({ currentStepId: targetStep.id })
+        .where(eq(sales.id, params.documentId));
+    } else if (params.documentType === 'PURCHASE_ORDER') {
+      await tx.update(purchases)
+        .set({ currentStepId: targetStep.id })
+        .where(eq(purchases.id, params.documentId));
+    }
+    
+    // Insert transition history log
+    const histId = `wfh_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    await tx.insert(workflowHistory).values({
+      id: histId,
+      companyId: cId,
+      documentId: params.documentId,
+      documentType: params.documentType,
+      fromStepId: currentStep.id,
+      toStepId: targetStep.id,
+      performedBy: params.performedBy,
+      notes: params.notes || '',
+    });
+    
+    // Log audit log
+    const auditId = `aud_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    await tx.insert(auditLogs).values({
+      id: auditId,
+      companyId: cId,
+      userId: params.performedBy,
+      action: 'WORKFLOW_TRANSITION',
+      details: JSON.stringify({
+        documentId: params.documentId,
+        documentType: params.documentType,
+        fromStep: currentStep.name,
+        toStep: targetStep.name,
+        transition: trans.name,
+        notes: params.notes || '',
+      }),
+    });
+  });
+  
+  // 6. Hook for Financial Posting
+  // If the target step is POSTED or APPROVED (indicating a final state that triggers ledger posting)
+  if (targetStep.status === 'POSTED' || targetStep.status === 'APPROVED') {
+    // Let's call a posting proxy without breaking the database or existing finance logic!
+    try {
+      await autoPostDocumentToJournal(cId, params.documentId, params.documentType);
+    } catch (err: any) {
+      console.error('Failed to post document automatically to Finance Journal:', err.message);
+      // We do not roll back the workflow transition itself (since state transition succeeded), 
+      // but we log it. In a real system, we might handle errors or post as draft.
+    }
+  }
+  
+  return targetStep;
+}
+
+// Helper to auto-post journal entries when document reaches FINAL APPROVED/POSTED status
+export async function autoPostDocumentToJournal(companyId: string, documentId: string, documentType: string) {
+  const cId = requireTenant(companyId);
+  
+  if (documentType === 'SALES_INVOICE' || documentType === 'SALES_ORDER') {
+    // Fetch invoice details
+    const saleRes = await db.select().from(sales).where(and(eq(sales.id, documentId), eq(sales.companyId, cId))).limit(1);
+    if (saleRes.length === 0) return;
+    const sale = saleRes[0];
+    
+    // Let's create an elegant double-entry journal posting!
+    // Assets (Accounts Receivable) -> Debit
+    // Revenue (Sales Revenue) -> Credit
+    // Liability (VAT output) -> Credit
+    
+    // Let's lookup or insert accounts for this posting dynamically
+    // In our chart of accounts, we should find appropriate IDs. If not found, use default placeholders so the ledger is preserved
+    const defaultAccounts = await db.select().from(accounts).where(eq(accounts.companyId, cId)).limit(3);
+    if (defaultAccounts.length >= 2) {
+      const recAcc = defaultAccounts[0].id; // AR Account
+      const revAcc = defaultAccounts[1].id; // Revenue Account
+      const vatAcc = defaultAccounts.length > 2 ? defaultAccounts[2].id : defaultAccounts[1].id; // VAT Account
+      
+      const totalNum = Number(sale.total);
+      const subtotalNum = Number(sale.subtotal);
+      const vatNum = Number(sale.vatAmount);
+      
+      const items = [
+        { accountId: recAcc, debit: totalNum, credit: 0, notes: `Ar receivables for Invoice ${sale.invoiceNumber}` },
+        { accountId: revAcc, debit: 0, credit: subtotalNum, notes: `Sales Revenue for Invoice ${sale.invoiceNumber}` },
+      ];
+      
+      if (vatNum > 0) {
+        items.push({ accountId: vatAcc, debit: 0, credit: vatNum, notes: `VAT on Sales for Invoice ${sale.invoiceNumber}` });
+      }
+      
+      await createJournalEntry(cId, {
+        reference: sale.invoiceNumber,
+        description: `Automated Workflow Posting for ${documentType} #${sale.invoiceNumber}`,
+        items,
+      });
+    }
+  } else if (documentType === 'PURCHASE_ORDER') {
+    // Fetch purchase details
+    const purchRes = await db.select().from(purchases).where(and(eq(purchases.id, documentId), eq(purchases.companyId, cId))).limit(1);
+    if (purchRes.length === 0) return;
+    const purchase = purchRes[0];
+    
+    // Double-entry posting for purchases:
+    // Expense (Cost of Goods Sold or Expense) -> Debit
+    // Liability (VAT input) -> Debit
+    // Asset/Liability (Accounts Payable) -> Credit
+    const defaultAccounts = await db.select().from(accounts).where(eq(accounts.companyId, cId)).limit(3);
+    if (defaultAccounts.length >= 2) {
+      const expAcc = defaultAccounts[1].id; // Expense Account
+      const payAcc = defaultAccounts[0].id; // AP Account
+      const vatAcc = defaultAccounts.length > 2 ? defaultAccounts[2].id : defaultAccounts[1].id; // VAT Account
+      
+      const totalNum = Number(purchase.total);
+      const subtotalNum = Number(purchase.subtotal);
+      const vatNum = Number(purchase.vatAmount);
+      
+      const items = [
+        { accountId: expAcc, debit: subtotalNum, credit: 0, notes: `Purchase Cost for Invoice ${purchase.purchaseNumber}` },
+        { accountId: payAcc, debit: 0, credit: totalNum, notes: `Accounts Payable for Invoice ${purchase.purchaseNumber}` },
+      ];
+      
+      if (vatNum > 0) {
+        items.push({ accountId: vatAcc, debit: vatNum, credit: 0, notes: `VAT on Purchase for Invoice ${purchase.purchaseNumber}` });
+      }
+      
+      await createJournalEntry(cId, {
+        reference: purchase.purchaseNumber,
+        description: `Automated Workflow Posting for Purchase #${purchase.purchaseNumber}`,
+        items,
+      });
+    }
+  }
+}
+
+// ----------------------------------------------------
+// NEW BUSINESS ACTIVITIES: QUEUES, WORKSHOPS, SERVICES
+// ----------------------------------------------------
+
+export async function getQueues(companyId: string, branchId?: string) {
+  const cId = requireTenant(companyId);
+  let query;
+  if (branchId) {
+    query = db.select().from(queues).where(and(eq(queues.companyId, cId), eq(queues.branchId, branchId)));
+  } else {
+    query = db.select().from(queues).where(eq(queues.companyId, cId));
+  }
+  return await query;
+}
+
+export async function saveQueue(data: any) {
+  const id = data.id || `q_${Date.now()}`;
+  const payload = { ...data, id };
+  await db.insert(queues).values(payload).onConflictDoUpdate({
+    target: queues.id,
+    set: payload
+  });
+  return id;
+}
+
+export async function getQueueTickets(queueId: string) {
+  return await db.select().from(queueTickets).where(eq(queueTickets.queueId, queueId));
+}
+
+export async function saveQueueTicket(data: any) {
+  const id = data.id || `tkt_${Date.now()}`;
+  const payload = { ...data, id };
+  await db.insert(queueTickets).values(payload).onConflictDoUpdate({
+    target: queueTickets.id,
+    set: payload
+  });
+  return id;
+}
+
+export async function updateQueueTicketStatus(id: string, status: string) {
+  await db.update(queueTickets).set({ status }).where(eq(queueTickets.id, id));
+}
+
+export async function getJobCards(companyId: string, branchId?: string) {
+  const cId = requireTenant(companyId);
+  let query;
+  if (branchId) {
+    query = db.select().from(jobCards).where(and(eq(jobCards.companyId, cId), eq(jobCards.branchId, branchId)));
+  } else {
+    query = db.select().from(jobCards).where(eq(jobCards.companyId, cId));
+  }
+  return await query;
+}
+
+export async function saveJobCard(data: any) {
+  const id = data.id || `job_${Date.now()}`;
+  const payload = { ...data, id };
+  await db.insert(jobCards).values(payload).onConflictDoUpdate({
+    target: jobCards.id,
+    set: payload
+  });
+  return id;
+}
+
+export async function getBusinessServices(companyId: string, branchId?: string) {
+  const cId = requireTenant(companyId);
+  let query;
+  if (branchId) {
+    query = db.select().from(businessServices).where(and(eq(businessServices.companyId, cId), eq(businessServices.branchId, branchId)));
+  } else {
+    query = db.select().from(businessServices).where(eq(businessServices.companyId, cId));
+  }
+  return await query;
+}
+
+export async function saveBusinessService(data: any) {
+  const id = data.id || `srv_${Date.now()}`;
+  const payload = { ...data, id };
+  await db.insert(businessServices).values(payload).onConflictDoUpdate({
+    target: businessServices.id,
+    set: payload
+  });
+  return id;
+}
+
+export async function getRestaurantTables(companyId: string, branchId?: string) {
+  const cId = requireTenant(companyId);
+  let query;
+  if (branchId) {
+    query = db.select().from(restaurantTables).where(and(eq(restaurantTables.companyId, cId), eq(restaurantTables.branchId, branchId)));
+  } else {
+    query = db.select().from(restaurantTables).where(eq(restaurantTables.companyId, cId));
+  }
+  return await query;
+}
+
+export async function saveRestaurantTable(data: any) {
+  const id = data.id || `tbl_${Date.now()}`;
+  const payload = { ...data, id };
+  await db.insert(restaurantTables).values(payload).onConflictDoUpdate({
+    target: restaurantTables.id,
+    set: payload
+  });
+  return id;
+}
+
+
 

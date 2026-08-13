@@ -24,6 +24,8 @@ export interface Company {
   address?: string;
   logoUrl?: string;
   ownerId?: string;
+  isActive?: boolean;
+  enableEmployeeCards?: boolean;
   createdAt?: string;
 }
 
@@ -35,6 +37,68 @@ export interface Branch {
   address?: string;
   phone?: string;
   isMain?: boolean;
+  isIndependentlyManaged?: boolean;
+}
+
+export interface Queue {
+  id: string;
+  name: string;
+  type: 'salon' | 'gym' | 'clinic' | 'other';
+  branchId?: string;
+  companyId: string;
+  currentQueueNumber: number;
+}
+
+export interface QueueTicket {
+  id: string;
+  queueId: string;
+  customerId?: string;
+  customerName: string;
+  customerPhone?: string;
+  ticketNumber: number;
+  status: 'WAITING' | 'SERVING' | 'COMPLETED' | 'CANCELLED';
+  expectedWaitTimeMinutes: number;
+  createdAt: string;
+}
+
+export interface VehicleDetails {
+  make: string;
+  model: string;
+  year?: string;
+  plateNumber: string;
+  vin?: string;
+}
+
+export interface JobCard {
+  id: string;
+  companyId: string;
+  branchId?: string;
+  customerId?: string;
+  customerName: string;
+  vehicleDetails: VehicleDetails;
+  description: string;
+  status: 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'CANCELLED';
+  createdAt: string;
+}
+
+export interface BusinessService {
+  id: string;
+  companyId: string;
+  branchId?: string;
+  name: string;
+  type: 'service' | 'course' | 'appointment';
+  price: number;
+  durationMinutes: number;
+}
+
+export interface RestaurantTable {
+  id: string;
+  companyId: string;
+  branchId?: string;
+  name: string;
+  capacity: number;
+  status: 'AVAILABLE' | 'OCCUPIED' | 'RESERVED';
+  currentOrderId?: string;
 }
 
 export interface Membership {

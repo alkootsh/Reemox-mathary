@@ -141,9 +141,9 @@ export default function Dashboard({
 
           <button
             onClick={() => setCurrentScreen('fast-pos')}
-            className="bg-accent/20 border border-accent/40 text-accent hover:bg-accent/30 px-4 py-3 rounded-2xl font-bold text-xs transition-all flex items-center gap-1.5"
+            className="bg-gold2/15 border border-gold2/40 text-gold2 hover:bg-gold2/25 px-4 py-3 rounded-2xl font-bold text-xs transition-all flex items-center gap-1.5 shadow-sm active:scale-95"
           >
-            <Zap size={15} />
+            <Zap size={15} className="animate-pulse" />
             <span>بيع سريع</span>
           </button>
         </div>

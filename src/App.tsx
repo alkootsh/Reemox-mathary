@@ -18,21 +18,63 @@ import CRM from './components/CRM';
 import Purchases from './components/Purchases';
 import Returns from './components/Returns';
 import OrderManagement from './components/OrderManagement';
+import QueueManagement from './components/QueueManagement';
+import WorkshopManagement from './components/WorkshopManagement';
+import ServiceManagement from './components/ServiceManagement';
+import RestaurantManagement from './components/RestaurantManagement';
 import ActivityLog from './components/ActivityLog';
 import InventoryMovementsView from './components/InventoryMovements';
 import CashierSessionView from './components/CashierSessionView';
 import ErrorBoundary from './components/ErrorBoundary';
-import { Category, Customer, Expense, Purchase, Sale, Product, Branch, Supplier, AppConfig, BusinessType, AppUser, UserRole } from './types/types';
+import { 
+  Category, 
+  Customer, 
+  Expense, 
+  Purchase, 
+  Sale, 
+  Product, 
+  Branch, 
+  Supplier, 
+  AppConfig, 
+  BusinessType, 
+  AppUser, 
+  UserRole,
+  Queue,
+  QueueTicket,
+  JobCard,
+  BusinessService,
+  RestaurantTable,
+  CashierSession
+} from './types/types';
+import { CreditCard, KeyRound, ScanLine, ShieldCheck, ShieldAlert, Sparkles, LogIn, AlertCircle } from 'lucide-react';
+import { getRuntimeConfig } from './lib/configApi';
+import Onboarding from './components/Onboarding';
 import LandingPage from './components/LandingPage';
 import MarketingPage from './components/MarketingPage';
 import ActivationPanel from './components/ActivationPanel';
-import { getCustomers, getSuppliers, getProducts, getSales, getPurchases, getExpenses, getUsers, seedInitialData, getBranches, getCashierSessions, cardLogin, logoutUser } from './lib/firestoreService';
+import { 
+  getCustomers, 
+  getSuppliers, 
+  getProducts, 
+  getSales, 
+  getPurchases, 
+  getExpenses, 
+  getUsers, 
+  seedInitialData, 
+  getBranches, 
+  getCashierSessions, 
+  cardLogin, 
+  logoutUser,
+  getQueues,
+  getQueueTickets,
+  getJobCards,
+  getBusinessServices,
+  getRestaurantTables
+} from './lib/firestoreService';
 import { playSuccessSound, playWarningSound, playAlertSound } from './lib/sound';
 import { getTrialStatus, TrialStatus } from './lib/license';
 import { useTenant } from './context/TenantContext';
 import { triggerLoginNotification } from './lib/notifications';
-import { CashierSession } from './types/types';
-import { CreditCard, KeyRound, ScanLine, ShieldCheck, ShieldAlert, Sparkles, LogIn, AlertCircle } from 'lucide-react';
 
 type Screen = 
   | 'landing' 
@@ -56,7 +98,11 @@ type Screen =
   | 'activity-log'
   | 'inventory-movements'
   | 'cashier-session'
-  | 'returns';
+  | 'returns'
+  | 'queue-management'
+  | 'workshop-management'
+  | 'service-management'
+  | 'restaurant-management';
 
 export default function App() {
   const { companyId, setCurrentUser: setTenantCurrentUser } = useTenant();
@@ -75,6 +121,8 @@ export default function App() {
   const [isLocked, setIsLocked] = useState(() => getTrialStatus().isExpired);
   const [online, setOnline] = useState(navigator.onLine);
   const [enabledModules, setEnabledModules] = useState<Record<string, boolean>>(() => safeParse(localStorage.getItem('enabledModules'), {}));
+  const [selectedIndustries, setSelectedIndustries] = useState<string[]>([]);
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
@@ -84,12 +132,39 @@ export default function App() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [registeredUsers, setRegisteredUsers] = useState<AppUser[]>([]);
   const [cashierSessions, setCashierSessions] = useState<CashierSession[]>([]);
+  
+  const [queues, setQueues] = useState<Queue[]>([]);
+  const [queueTickets, setQueueTickets] = useState<QueueTicket[]>([]);
+  const [jobCards, setJobCards] = useState<JobCard[]>([]);
+  const [businessServices, setBusinessServices] = useState<BusinessService[]>([]);
+  const [restaurantTables, setRestaurantTables] = useState<RestaurantTable[]>([]);
+
   const [loading, setLoading] = useState(true);
 
   // Current logged in user
   const [currentUser, setCurrentUser] = useState<AppUser | null>(() => {
     return safeParse(localStorage.getItem('currentUser'), null);
   });
+
+  useEffect(() => {
+    async function fetchConfig() {
+      if (currentUser) {
+        const config = await getRuntimeConfig();
+        if (config) {
+          const mods: Record<string, boolean> = {};
+          config.enabledModules.forEach((m: string) => mods[m] = true);
+          setEnabledModules(mods);
+          localStorage.setItem('enabledModules', JSON.stringify(mods));
+          setSelectedIndustries(config.selectedIndustries || []);
+          
+          if ((!config.selectedIndustries || config.selectedIndustries.length === 0) && currentUser.role === 'admin') {
+            setShowOnboarding(true);
+          }
+        }
+      }
+    }
+    fetchConfig();
+  }, [currentUser]);
 
   // Login mode: 'card' | 'credentials'
   const [loginMode, setLoginMode] = useState<'card' | 'credentials'>('card');
@@ -202,7 +277,11 @@ export default function App() {
           getExpenses(companyId),
           getUsers(companyId),
           getBranches(companyId),
-          getCashierSessions(companyId)
+          getCashierSessions(companyId),
+          getQueues(companyId),
+          getJobCards(companyId),
+          getBusinessServices(companyId),
+          getRestaurantTables(companyId)
         ]);
 
         const cList = results[0].status === 'fulfilled' && results[0].value ? results[0].value : [];
@@ -214,6 +293,10 @@ export default function App() {
         const uList = results[6].status === 'fulfilled' && results[6].value ? results[6].value : [];
         const bList = results[7].status === 'fulfilled' && results[7].value ? results[7].value : [];
         const sessList = results[8].status === 'fulfilled' && results[8].value ? results[8].value : [];
+        const qList = results[9].status === 'fulfilled' && results[9].value ? results[9].value : [];
+        const jobList = results[10].status === 'fulfilled' && results[10].value ? results[10].value : [];
+        const srvList = results[11].status === 'fulfilled' && results[11].value ? results[11].value : [];
+        const tblList = results[12].status === 'fulfilled' && results[12].value ? results[12].value : [];
 
         setCustomers(cList.length > 0 ? cList : [{ id: 'cash-customer', name: 'عميل نقدي', phone: '0000000000', openingBalance: 0, companyId }]);
         setSuppliers(sList);
@@ -223,6 +306,17 @@ export default function App() {
         setExpenses(expList);
         setBranches(bList.length > 0 ? bList : [{ id: 'default', name: 'الفرع الرئيسي', companyId }]);
         setCashierSessions(sessList);
+        setQueues(qList);
+        setJobCards(jobList);
+        setBusinessServices(srvList);
+        setRestaurantTables(tblList);
+
+        // Fetch tickets for all queues in parallel
+        if (qList.length > 0) {
+          const ticketResults = await Promise.allSettled(qList.map(q => getQueueTickets(q.id)));
+          const allTickets: QueueTicket[] = ticketResults.flatMap(r => r.status === 'fulfilled' && r.value ? r.value : []);
+          setQueueTickets(allTickets);
+        }
         
         if (uList.length > 0) {
           setRegisteredUsers(uList);
@@ -464,6 +558,35 @@ export default function App() {
   // Screen permission filter
   const isScreenAllowed = (screen: Screen): boolean => {
     if (!currentUser) return false;
+    
+    // Module check first
+    const screenToModule: Partial<Record<Screen, string>> = {
+      'pos': 'POS',
+      'fast-pos': 'POS',
+      'order-management': 'POS',
+      'cashier-session': 'POS',
+      'customers': 'SALES',
+      'inventory': 'INVENTORY',
+      'inventory-movements': 'INVENTORY',
+      'categories': 'INVENTORY',
+      'purchases': 'PURCHASES',
+      'suppliers': 'PURCHASES',
+      'accounting': 'ACCOUNTING',
+      'expenses': 'ACCOUNTING',
+      'manufacturing': 'MANUFACTURING',
+      'hr': 'HR',
+      'crm': 'CRM',
+      'queue-management': 'SALES',
+      'workshop-management': 'SALES',
+      'service-management': 'SALES',
+      'restaurant-management': 'SALES'
+    };
+    
+    const requiredModule = screenToModule[screen];
+    if (requiredModule && (!enabledModules || !enabledModules[requiredModule])) {
+      return false;
+    }
+
     if (currentUser.role === 'admin') return true;
 
     // Strict constraint: Settings, wipe, export and edit functions restricted to Admin only
@@ -787,7 +910,9 @@ export default function App() {
     'manufacturing': { name: 'التصنيع', description: 'إدارة قوائم المواد BOM وأوامر الإنتاج' },
     'hr': { name: 'الموارد البشرية', description: 'بيانات الموظفين والرواتب وشؤون الموظفين' },
     'crm': { name: 'العملاء والولاء', description: 'بيانات العملاء ونقاط الولاء وسجل التفاعلات' },
-    'reports': { name: 'التقارير المتقدمة', description: 'تحليل شامل للمبيعات، المشتريات، والمخزون' }
+    'reports': { name: 'التقارير المتقدمة', description: 'تحليل شامل للمبيعات، المشتريات، والمخزون' },
+    'queue-management': { name: 'إدارة الأدوار (الطوابير)', description: 'نظام إدارة طوابير انتظار العملاء الذكي' },
+    'workshop-management': { name: 'صيانة السيارات', description: 'إدارة بطاقات صيانة السيارات وسجل الإصلاحات' }
   };
 
   return (
@@ -797,6 +922,23 @@ export default function App() {
         currentScreen={screenContexts[currentScreen] || { name: currentScreen, description: '' }}
         companyId="company_default"
       />
+      {showOnboarding && (
+        <Onboarding 
+          currentUser={currentUser} 
+          onComplete={async () => {
+             setShowOnboarding(false);
+             // Re-fetch config to apply new industries
+             const config = await getRuntimeConfig();
+             if (config) {
+                const mods: Record<string, boolean> = {};
+                config.enabledModules.forEach((m: string) => mods[m] = true);
+                setEnabledModules(mods);
+                localStorage.setItem('enabledModules', JSON.stringify(mods));
+                setSelectedIndustries(config.selectedIndustries || []);
+             }
+          }} 
+        />
+      )}
       {/* Top Header Bar */}
       <div className="flex flex-wrap justify-between items-center px-4 py-2 bg-secondary border-b border-border text-xs sticky top-0 z-40 shadow-sm gap-2">
          <div className="flex items-center gap-2 flex-wrap">
@@ -912,7 +1054,14 @@ export default function App() {
 
           {currentScreen === 'pos' && isScreenAllowed('pos') && (
             <ErrorBoundary fallbackTitle="حدث خطأ في نقطة البيع POS">
-              <POS customers={customers} currentUser={currentUser} onNavigateHome={() => setCurrentScreen('dashboard')} />
+              <POS 
+                customers={customers} 
+                currentUser={currentUser} 
+                onNavigateHome={() => setCurrentScreen('dashboard')} 
+                initialProducts={products}
+                initialSales={sales}
+                initialCashierSessions={cashierSessions}
+              />
             </ErrorBoundary>
           )}
           {currentScreen === 'fast-pos' && isScreenAllowed('fast-pos') && <FastPOS sales={sales} />}
@@ -927,7 +1076,22 @@ export default function App() {
           )}
 
           {currentScreen === 'reports' && isScreenAllowed('reports') && (
-            <Reports purchases={purchases} setPurchases={setPurchases} sales={sales} products={products} expenses={expenses} customers={customers} suppliers={suppliers} branches={branches} setSales={setSales} />
+            <Reports 
+              purchases={purchases} 
+              setPurchases={setPurchases} 
+              sales={sales} 
+              products={products} 
+              expenses={expenses} 
+              customers={customers} 
+              suppliers={suppliers} 
+              branches={branches} 
+              setSales={setSales}
+              queues={queues}
+              queueTickets={queueTickets}
+              jobCards={jobCards}
+              businessServices={businessServices}
+              restaurantTables={restaurantTables}
+            />
           )}
 
           {currentScreen === 'suppliers' && isScreenAllowed('suppliers') && (
@@ -970,6 +1134,22 @@ export default function App() {
             <Purchases purchases={purchases} setPurchases={setPurchases} />
           )}
 
+          {currentScreen === 'queue-management' && isScreenAllowed('queue-management') && (
+            <QueueManagement />
+          )}
+
+          {currentScreen === 'workshop-management' && isScreenAllowed('workshop-management') && (
+            <WorkshopManagement />
+          )}
+
+          {currentScreen === 'service-management' && isScreenAllowed('service-management') && (
+            <ServiceManagement />
+          )}
+
+          {currentScreen === 'restaurant-management' && isScreenAllowed('restaurant-management') && (
+            <RestaurantManagement />
+          )}
+
           {currentScreen === 'returns' && isScreenAllowed('returns') && (
             <Returns onNavigateHome={() => setCurrentScreen('dashboard')} />
           )}
@@ -1005,7 +1185,7 @@ export default function App() {
                 <>
                   <button onClick={() => setCurrentScreen('dashboard')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'dashboard' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🏠 <span className="text-[10px] mt-1">الرئيسية</span></button>
                   <button onClick={() => setCurrentScreen('pos')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'pos' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🛒 <span className="text-[10px] mt-1">نقطة البيع</span></button>
-                  <button onClick={() => setCurrentScreen('fast-pos')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'fast-pos' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>⚡ <span className="text-[10px] mt-1">بيع سريع</span></button>
+                  <button onClick={() => setCurrentScreen('fast-pos')} className={`flex flex-col items-center justify-center flex-shrink-0 px-3 py-1 rounded-xl transition-all duration-300 relative ${currentScreen === 'fast-pos' ? 'bg-gradient-to-tr from-amber-600 to-amber-400 text-white font-black scale-105 shadow-md shadow-amber-500/25 border border-amber-300/60' : 'text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 hover:scale-105 active:scale-95 border border-amber-500/20 bg-amber-500/5'}`} title="نقطة البيع اللمسية السريعة واللحظية">⚡ <span className="text-[10px] mt-1 font-bold">بيع سريع (POS)</span></button>
                   <button onClick={() => setCurrentScreen('cashier-session')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'cashier-session' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🔐 <span className="text-[10px] mt-1">الوردية و Z</span></button>
                   <button onClick={() => setCurrentScreen('inventory')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'inventory' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📦 <span className="text-[10px] mt-1">المخزون</span></button>
                   <button onClick={() => setCurrentScreen('inventory-movements')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'inventory-movements' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📋 <span className="text-[10px] mt-1">حركات المخزون</span></button>
@@ -1020,6 +1200,10 @@ export default function App() {
                   <button onClick={() => setCurrentScreen('customers')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'customers' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>👥 <span className="text-[10px] mt-1">العملاء</span></button>
                   <button onClick={() => setCurrentScreen('categories')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'categories' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🏷️ <span className="text-[10px] mt-1">التصنيفات</span></button>
                   <button onClick={() => setCurrentScreen('order-management')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'order-management' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📋 <span className="text-[10px] mt-1">الطلبات</span></button>
+                  <button onClick={() => setCurrentScreen('queue-management')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'queue-management' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🎟️ <span className="text-[10px] mt-1">إدارة الأدوار</span></button>
+                  <button onClick={() => setCurrentScreen('workshop-management')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'workshop-management' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🚗 <span className="text-[10px] mt-1">صيانة السيارات</span></button>
+                  <button onClick={() => setCurrentScreen('service-management')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'service-management' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🛠️ <span className="text-[10px] mt-1">الخدمات</span></button>
+                  <button onClick={() => setCurrentScreen('restaurant-management')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'restaurant-management' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🍽️ <span className="text-[10px] mt-1">المطاعم</span></button>
                   <button onClick={() => setCurrentScreen('settings')} className={`flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl transition-colors ${currentScreen === 'settings' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>⚙️ <span className="text-[10px] mt-1">الإعدادات</span></button>
                   <button onClick={handleLogout} className="flex flex-col items-center flex-shrink-0 px-3 py-1 rounded-xl bg-danger/20 border border-danger/40 text-danger hover:bg-danger hover:text-white transition-colors">🚪 <span className="text-[10px] mt-1 font-bold">تسجيل خروج</span></button>
                 </>
@@ -1029,7 +1213,7 @@ export default function App() {
               {currentUser.role === 'cashier' && (
                 <>
                   <button onClick={() => setCurrentScreen('pos')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'pos' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🛒 <span className="text-xs mt-1">نقطة البيع (POS)</span></button>
-                  <button onClick={() => setCurrentScreen('fast-pos')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'fast-pos' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>⚡ <span className="text-xs mt-1">بيع سريع</span></button>
+                  <button onClick={() => setCurrentScreen('fast-pos')} className={`flex flex-col items-center justify-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-all duration-300 relative ${currentScreen === 'fast-pos' ? 'bg-gradient-to-tr from-amber-600 to-amber-400 text-white font-black scale-105 shadow-md shadow-amber-500/25 border border-amber-300/60' : 'text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 hover:scale-105 active:scale-95 border border-amber-500/20 bg-amber-500/5'}`} title="نقطة البيع اللمسية السريعة واللحظية">⚡ <span className="text-xs mt-1 font-bold">بيع سريع (POS)</span></button>
                   <button onClick={() => setCurrentScreen('cashier-session')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'cashier-session' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>🔐 <span className="text-xs mt-1">الوردية وتقرير Z</span></button>
                   <button onClick={() => setCurrentScreen('order-management')} className={`flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl transition-colors ${currentScreen === 'order-management' ? 'bg-gold text-white font-bold' : 'text-text-dim hover:text-white'}`}>📋 <span className="text-xs mt-1">الطلبات والفواتير</span></button>
                   <button onClick={handleLogout} className="flex flex-col items-center flex-shrink-0 px-4 py-1.5 rounded-xl bg-danger/20 border border-danger/40 text-danger hover:bg-danger hover:text-white transition-colors">🚪 <span className="text-xs mt-1 font-bold">تسجيل الخروج</span></button>

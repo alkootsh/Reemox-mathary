@@ -97,20 +97,39 @@ export interface SuspendedOrder {
   total: number;
 }
 
-export default function POS({ customers, currentUser, onNavigateHome }: { customers: Customer[]; currentUser: AppUser | null; onNavigateHome?: () => void }) {
+export default function POS({ 
+  customers, 
+  currentUser, 
+  onNavigateHome,
+  initialProducts = [],
+  initialSales = [],
+  initialCashierSessions = []
+}: { 
+  customers: Customer[]; 
+  currentUser: AppUser | null; 
+  onNavigateHome?: () => void;
+  initialProducts?: Product[];
+  initialSales?: Sale[];
+  initialCashierSessions?: CashierSession[];
+}) {
   const [searchTerm, setSearchTerm] = useState('');
   const [isScanning, setIsScanning] = useState(false);
-  const [sales, setSales] = useState<Sale[]>([]);
-  const [activeSession, setActiveSession] = useState<CashierSession | null>(null);
+  const [sales, setSales] = useState<Sale[]>(initialSales);
+  const [activeSession, setActiveSession] = useState<CashierSession | null>(() => {
+    return initialCashierSessions.find(s => s.status === 'ACTIVE' || s.status === 'OPEN') || null;
+  });
 
   useEffect(() => {
     async function loadStats() {
-      const [sList, sessList] = await Promise.all([getSales(currentUser?.companyId), getCashierSessions(currentUser?.companyId)]);
+      const [sList, sessList] = await Promise.all([
+        initialSales.length > 0 ? Promise.resolve(initialSales) : getSales(currentUser?.companyId), 
+        initialCashierSessions.length > 0 ? Promise.resolve(initialCashierSessions) : getCashierSessions(currentUser?.companyId)
+      ]);
       setSales(sList);
       setActiveSession(sessList.find(s => s.status === 'ACTIVE' || s.status === 'OPEN') || null);
     }
     loadStats();
-  }, [currentUser]);
+  }, [currentUser, initialSales, initialCashierSessions]);
 
   const sessionSales = activeSession ? sales.filter(s => new Date(s.date).getTime() >= new Date(activeSession.openedAt).getTime() && s.cashierName === currentUser?.name) : [];
   const totalSales = sessionSales.reduce((sum, s) => sum + (s.finalTotal || s.total || 0), 0);
@@ -248,12 +267,14 @@ export default function POS({ customers, currentUser, onNavigateHome }: { custom
     }`);
   };
 
-  const [products, setProducts] = useState<Product[]>([]);
+  const [products, setProducts] = useState<Product[]>(initialProducts);
   
   const fetchProducts = async () => {
     try {
-      const productsData = await getProducts();
-      setProducts(productsData);
+      if (initialProducts.length === 0) {
+        const productsData = await getProducts();
+        setProducts(productsData);
+      }
     } catch (e) {
       console.error('Error fetching products:', e);
     }

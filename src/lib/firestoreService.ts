@@ -13,7 +13,12 @@ import {
   AppUser,
   Company,
   Branch,
-  Membership
+  Membership,
+  Queue,
+  QueueTicket,
+  JobCard,
+  BusinessService,
+  RestaurantTable
 } from '../types/types';
 
 export const DEFAULT_COMPANY_ID = 'company_default';
@@ -85,7 +90,11 @@ async function getAuthHeaders(): Promise<Record<string, string>> {
     try {
       const now = Date.now();
       if (!cachedClientToken || cachedClientToken.expiresAt <= now) {
-        const token = await auth.currentUser.getIdToken(false);
+        const tokenPromise = auth.currentUser.getIdToken(false);
+        const timeoutPromise = new Promise<string>((_, reject) => 
+          setTimeout(() => reject(new Error('Auth token retrieval timeout')), 1500)
+        );
+        const token = await Promise.race([tokenPromise, timeoutPromise]);
         cachedClientToken = { token, expiresAt: now + 10 * 60 * 1000 }; // Cache for 10 minutes
       }
       headers['Authorization'] = `Bearer ${cachedClientToken.token}`;
@@ -203,6 +212,13 @@ export async function saveCompany(companyData: Partial<Company>): Promise<string
   return res && res.id ? res.id : '';
 }
 
+export async function deleteCompany(id: string): Promise<boolean> {
+  const res = await apiFetch<{ success: boolean }>(`/api/companies/${id}`, {
+    method: 'DELETE'
+  });
+  return res?.success || false;
+}
+
 export async function getBranches(companyId: string = DEFAULT_COMPANY_ID): Promise<Branch[]> {
   const sqlData = await apiFetch<Branch[]>(`/api/branches?companyId=${companyId}`);
   return sqlData || [];
@@ -215,6 +231,79 @@ export async function saveBranch(branchData: Partial<Branch>, companyId: string 
     body: JSON.stringify(payload)
   });
   return res && res.id ? res.id : '';
+}
+
+// Business Activities: Queues, Workshops, Services
+export async function getQueues(companyId: string, branchId?: string): Promise<Queue[]> {
+  const url = `/api/queues?companyId=${companyId}${branchId ? `&branchId=${branchId}` : ''}`;
+  return await apiFetch<Queue[]>(url) || [];
+}
+
+export async function saveQueue(queue: Partial<Queue>): Promise<string> {
+  const res = await apiFetch<{ success: boolean, id: string }>('/api/queues', {
+    method: 'POST',
+    body: JSON.stringify(queue)
+  });
+  return res?.id || '';
+}
+
+export async function getQueueTickets(queueId: string): Promise<QueueTicket[]> {
+  return await apiFetch<QueueTicket[]>(`/api/queue-tickets?queueId=${queueId}`) || [];
+}
+
+export async function saveQueueTicket(ticket: Partial<QueueTicket>): Promise<string> {
+  const res = await apiFetch<{ success: boolean, id: string }>('/api/queue-tickets', {
+    method: 'POST',
+    body: JSON.stringify(ticket)
+  });
+  return res?.id || '';
+}
+
+export async function updateQueueTicketStatus(id: string, status: string): Promise<boolean> {
+  const res = await apiFetch<{ success: boolean }>(`/api/queue-tickets/${id}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status })
+  });
+  return res?.success || false;
+}
+
+export async function getJobCards(companyId: string, branchId?: string): Promise<JobCard[]> {
+  const url = `/api/job-cards?companyId=${companyId}${branchId ? `&branchId=${branchId}` : ''}`;
+  return await apiFetch<JobCard[]>(url) || [];
+}
+
+export async function saveJobCard(job: Partial<JobCard>): Promise<string> {
+  const res = await apiFetch<{ success: boolean, id: string }>('/api/job-cards', {
+    method: 'POST',
+    body: JSON.stringify(job)
+  });
+  return res?.id || '';
+}
+
+export async function getBusinessServices(companyId: string, branchId?: string): Promise<BusinessService[]> {
+  const url = `/api/business-services?companyId=${companyId}${branchId ? `&branchId=${branchId}` : ''}`;
+  return await apiFetch<BusinessService[]>(url) || [];
+}
+
+export async function saveBusinessService(service: Partial<BusinessService>): Promise<string> {
+  const res = await apiFetch<{ success: boolean, id: string }>('/api/business-services', {
+    method: 'POST',
+    body: JSON.stringify(service)
+  });
+  return res?.id || '';
+}
+
+export async function getRestaurantTables(companyId: string, branchId?: string): Promise<RestaurantTable[]> {
+  const url = `/api/restaurant-tables?companyId=${companyId}${branchId ? `&branchId=${branchId}` : ''}`;
+  return await apiFetch<RestaurantTable[]>(url) || [];
+}
+
+export async function saveRestaurantTable(table: Partial<RestaurantTable>): Promise<string> {
+  const res = await apiFetch<{ success: boolean, id: string }>('/api/restaurant-tables', {
+    method: 'POST',
+    body: JSON.stringify(table)
+  });
+  return res?.id || '';
 }
 
 export async function getMemberships(companyId: string = DEFAULT_COMPANY_ID): Promise<Membership[]> {
